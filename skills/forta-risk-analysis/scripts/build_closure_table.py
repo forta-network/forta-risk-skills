@@ -8,11 +8,13 @@ node tree JSON schema
 pass a file containing:
   {"title":"Protocol name",        # required, used in the heading and the title tag
    "scope":"what the denominator covers",
+   "page_title":"Aave v3 Control Closure",  # optional browser-tab / gallery name; defaults to "Dependency closure: <title>"
    "nav": 375500000,               # required, the denominator
    "snapshot":"14 Aug 2026",
    "floor":"$1M",                  # optional, expansion floor, quoted in the footer
    "headline":["1","key reaching 71.0% of supply"],   # optional lead KPI
    "positions":{...}, "tree":[node,...],
+   "blast":{...},                  # optional blast-radius section, see below
    }
 =====================
 node = {
@@ -112,7 +114,16 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 details{margin:7px 0}summary{cursor:pointer;color:#cbd5e1;font-size:12.5px;padding:4px 0}
 footer{margin-top:40px;padding-top:14px;border-top:1px solid #2a3240;color:#9aa7b4;font-size:11.5px}
 .hidden{display:none}
-.legend{color:#7d8998;font-size:11.5px;margin:6px 0 0}"""
+.legend{color:#7d8998;font-size:11.5px;margin:6px 0 0}
+table.bl{width:100%;border-collapse:collapse;font-size:12.5px;margin:10px 0 4px}
+table.bl th{text-align:left;padding:7px 8px;border-bottom:1px solid #2a3240;color:#9aa7b4;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;font-weight:600}
+table.bl td{padding:6px 8px;border-bottom:1px solid #1b2230;vertical-align:top}
+table.bl tr:hover>td{background:#1a212c}
+table.bl td.n,table.bl th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+td.bind{background:#2a1d10;color:#f0a742;font-weight:650;box-shadow:inset 2px 0 0 #f0a742}
+td.unread{color:#7d8998;font-style:italic}
+.asset{font-weight:650}
+.scen{color:#7d8998;font-size:11.5px;margin:4px 0 12px}"""
 
 JS="""
 var ROWS=__ROWS__;
@@ -161,18 +172,91 @@ function render(){
 }
 function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
 function tog(i){ open[i]=!open[i]; render(); }
-function all(v){ ROWS.forEach(function(r){ open[r.i]=v; }); render(); }
+function setAll(v){ ROWS.forEach(function(r){ open[r.i]=v; }); render(); }
 function lvl(n){ ROWS.forEach(function(r){ open[r.i]= r.d<n; }); render(); }
 function crit(){ ROWS.forEach(function(r){open[r.i]=true;}); document.getElementById('q').value=''; document.getElementById('cf').value=''; render();
   }
 """
+
+def render_blast(_d, NAV, esc_py):
+    b=_d.get("blast")
+    if not b: return []
+    A=[]; w=A.append
+    LBL={"collateral_room":"Collateral already posted, at reserve LTV",
+         "postable":"Further collateral that could be posted",
+         "liquidity":"Liquidity in the other reserves",
+         "borrow_cap":"Borrow cap headroom"}
+    rows=[]
+    for x in b.get("assets",[]):
+        cons=x.get("constraints",{})
+        live={k:v for k,v in cons.items() if isinstance(v,(int,float))}
+        extra=min(live.values()) if live else 0
+        binding=[k for k,v in live.items() if v==extra]
+        cur=x["supplied"]; mx=cur+extra
+        rows.append(dict(x=x,cons=cons,extra=extra,binding=set(binding),cur=cur,mx=mx))
+    rows.sort(key=lambda r:-r["mx"])
+
+    w("<h2>%s</h2>"%esc_py(b.get("title","Blast radius")))
+    w("<p class=lead>%s</p>"%esc_py(b.get("lead","")))
+    w("<p class=scen>%s</p>"%esc_py(b.get("scenario_note","")))
+
+    w("<table class=bl><thead><tr><th>Reserve</th><th>Failure assumed</th><th class=n>Supplied</th>"
+      "<th class=n>Current estimated loss</th><th class=n>Share</th><th class=n>Maximum loss</th><th class=n>Share</th>"
+      "<th>What bounds the extra draw</th></tr></thead><tbody>")
+    for r in rows:
+        x=r["x"]
+        bindlbl=", ".join(LBL.get(k,k) for k in sorted(r["binding"])) if r["binding"] else "nothing bounds it"
+        w("<tr><td><span class=asset>%s</span><span class=addr>%s</span></td>"
+          "<td class=mech>%s</td><td class=n>$%s</td><td class=n>$%s</td><td class=n>%s%%</td>"
+          "<td class=n>$%s</td><td class=n>%s%%</td><td class=mech>%s</td></tr>"
+          %(esc_py(x["name"]),esc_py(x.get("addr","")),esc_py(b.get("vector","becomes worthless")),
+            format(x["supplied"],","),format(r["cur"],","),("%.2f"%(100.0*r["cur"]/NAV)),
+            format(r["mx"],","),("%.2f"%(100.0*r["mx"]/NAV)),esc_py(bindlbl)))
+        if x.get("note"):
+            w("<tr><td colspan=8 class=note style='padding-left:10px'>%s</td></tr>"%esc_py(x["note"]))
+    w("</tbody></table>")
+
+    w("<h2>%s</h2>"%esc_py(b.get("constraints_title","Defensive borrowing: the four constraints")))
+    w("<p class=lead>%s</p>"%esc_py(b.get("constraints_lead","")))
+    order=["collateral_room","postable","liquidity","borrow_cap"]
+    w("<table class=bl><thead><tr><th>Reserve</th>"+"".join("<th class=n>%s</th>"%LBL[k] for k in order)
+      +"<th class=n>Extra drawable</th><th class=n>Maximum loss</th></tr></thead><tbody>")
+    for r in rows:
+        x=r["x"]; w("<tr><td><span class=asset>%s</span></td>"%esc_py(x["name"]))
+        for k in order:
+            v=r["cons"].get(k)
+            if isinstance(v,(int,float)):
+                cls="n bind" if k in r["binding"] else "n"
+                w("<td class='%s'>$%s</td>"%(cls,format(int(v),",")))
+            else:
+                w("<td class='n unread'>%s</td>"%esc_py(v if isinstance(v,str) else "not carried"))
+        w("<td class=n>$%s</td><td class=n>$%s</td></tr>"%(format(r["extra"],","),format(r["mx"],",")))
+    w("</tbody></table>")
+    w("<p class=legend>%s</p>"%esc_py(b.get("constraints_legend","The highlighted cell is the constraint that binds: the smallest of the four sets the extra draw.")))
+
+    hs=b.get("holders")
+    if hs:
+        w("<h2>%s</h2>"%esc_py(hs.get("title","Who absorbs the loss")))
+        w("<p class=lead>%s</p>"%esc_py(hs.get("lead","")))
+        w("<table class=bl><thead><tr><th>Reserve</th><th class=n>Holders</th><th>Largest single holder</th>"
+          "<th class=n>Its position</th><th class=n>Share of reserve</th></tr></thead><tbody>")
+        for x in hs.get("rows",[]):
+            w("<tr><td><span class=asset>%s</span></td><td class=n>%s</td><td>%s<span class=addr>%s</span></td>"
+              "<td class=n>$%s</td><td class=n>%s%%</td></tr>"
+              %(esc_py(x["name"]),format(x["holders"],","),esc_py(x["top_label"]),esc_py(x.get("top_addr","")),
+                format(x["top_usd"],","),("%.2f"%(100.0*x["top_usd"]/x["reserve_total"]))))
+            if x.get("note"):
+                w("<tr><td colspan=5 class=note style='padding-left:10px'>%s</td></tr>"%esc_py(x["note"]))
+        w("</tbody></table>")
+        if hs.get("legend"): w("<p class=legend>%s</p>"%esc_py(hs["legend"]))
+    return A
 
 def esc_py(x):
     return str(x).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
 H=[]; a=H.append
 TITLE=_d.get("title","Protocol")
-a("<!doctype html><meta charset=utf-8><title>Dependency closure: %s</title>"%esc_py(TITLE))
+a("<!doctype html><meta charset=utf-8><title>%s</title>"%esc_py(_d.get("page_title") or ("Dependency closure: "+TITLE)))
 a("<style>%s</style><div class=w>"%CSS)
 a("<div class=eyebrow>Protocol dependency closure</div><h1>%s: every dependency, one table</h1>"%esc_py(TITLE))
 a("<div class=sub>%s &middot; snapshot %s &middot; partition <span class=addr>risk-graph-rt-v3</span> &middot; denominator $%s</div>"%(_d.get("scope",""),SNAP,format(NAV,",")))
@@ -189,11 +273,13 @@ a("<div class=kpi><div class=n>$%s</div><div class=l>denominator</div></div>"%fo
 a("</div>")
 a("""<div class=call><h4>How to read the exposure column</h4><p>Exposure is the market supply that sits beneath a node, computed as the <b>union</b> of the positions of that node and everything under it, so a parent is never the sum of its children. It answers: <i>if this contract is compromised, whether by a bug or a key, how much user supply is in scope.</i> It is not expected loss: no probability weighting, no recovery, and no assumption that an attacker extracts the full amount.</p></div>""")
 
+H.extend(render_blast(_d, NAV, esc_py))
+
 a("<h2>All dependencies</h2>")
 a("<p class=lead>Expand any row to see what it depends on, and keep going. Depth runs to %d hops from the protocol.</p>"%stats["maxdepth"])
 a("<div class=bar>")
 a("<button onclick='lvl(1)'>Overview</button><button onclick='lvl(2)'>2 levels</button><button onclick='lvl(3)'>3 levels</button>")
-a("<button onclick='all(true)'>Expand all</button><button onclick='all(false)'>Collapse all</button>")
+a("<button onclick='setAll(true)'>Expand all</button><button onclick='setAll(false)'>Collapse all</button>")
 a("<input type=text id=q placeholder='Filter: address, name, mechanism…' oninput='render()'>")
 a("<select id=cf onchange='render()'><option value=''>All categories</option>")
 for c in ["internal","internal / core","internal / governance","internal / curators","internal / periphery",
