@@ -1,0 +1,323 @@
+{
+ "mode": "targeted",
+ "subject": {
+  "name": "Ether (ETH)",
+  "address": "native",
+  "chain": "Ethereum mainnet",
+  "snapshot": "Example snapshot (synthetic figures)",
+  "partition": "risk-graph-rt-v3",
+  "vector": "ETH value to zero, which takes every ETH claim with it (WETH, stETH, wstETH, eETH, weETH)",
+  "vector_class": "value_to_zero",
+  "other_vectors": true
+ },
+ "target": {
+  "name": "Example USDC Vault (synthetic figures)",
+  "address": "0xaaaa1111111111111111111111111111111111aa",
+  "type": "Morpho VaultV2, USDC-denominated",
+  "assets": 359861664.58,
+  "denominator_basis": "The vault holds $359,861,665. Two independent readings agree: dividing each of the 8 funded positions by the share of the vault it represents gives the same total on every one, and share count times share price lands within 0.19%. Of the total, $305,066,834 is deployed into markets and $54,794,831 sits idle as undeployed USDC. Synthetic figures throughout: this file is a worked example, not a measurement.",
+  "leveraged": false
+ },
+ "floor": "0.5% of target assets ($1.80M), or $10,000, whichever smaller: $10,000",
+ "paths": [
+  {
+   "id": "P1",
+   "position_key": "mkt_85d59152ee",
+   "position_label": "Morpho weETH/USDC (morpho_market_0x85d59152ee)",
+   "position_usd": 51211864.8,
+   "mechanism": "isolated_market_collateral",
+   "chain": [
+    {
+     "edge": "VAULT_ALLOCATION",
+     "to": "morpho_market_0x85d59152ee",
+     "to_label": "Morpho weETH/USDC",
+     "fraction": 1.0,
+     "note": "share_pct 14.029% of assets, via adapter 0xc2a11ba5",
+     "sub": "$51,211,865",
+     "edge_sub": "14.23% of the portfolio"
+    },
+    {
+     "edge": "LENDING_COLLATERAL",
+     "to": "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee",
+     "to_label": "weETH (ether.fi Wrapped eETH)",
+     "fraction": 0.863963,
+     "note": "sole collateral, traversed INBOUND; fraction is utilisation 44.25M/51.21M",
+     "sub": "UUPSProxy, upgradeable",
+     "edge_sub": "86.4% utilised"
+    },
+    {
+     "edge": "WRAP_UNWRAP",
+     "to": "0x35fa164735182de50811e8e2e824cfb9b6118ac2",
+     "to_label": "eETH (ether.fi Staked ETH)",
+     "fraction": 1.0,
+     "note": "also RECEIPT_FOR and BACKED_BY, all three agree",
+     "sub": "proxy, impl 0xd1901dd3"
+    },
+    {
+     "edge": "backing",
+     "to": "native",
+     "to_label": "ETH",
+     "fraction": 1.0,
+     "note": "eETH to ETH is NOT an edge in the graph; asserted externally, eETH is a 1:1 claim on staked ETH",
+     "sub": "not modelled onward",
+     "edge_sub": "not modelled in the graph"
+    }
+   ],
+   "exposure_usd": 51211864.8,
+   "loss_usd": 44245134.94,
+   "loss_basis": "supply share 1.000000 x debt backed by weETH 44,245,136.69 (isolated market, total_borrowed_usd)",
+   "ceiling": false,
+   "unresolved": false,
+   "defensive_borrowing": {
+    "existing_debt_usd": 44245134.94,
+    "collateral_usd": 58000000.0,
+    "lltv_pct": 86,
+    "available_liquidity_usd": 6966729.86,
+    "borrow_cap_usd": 48000000.0,
+    "new_collateral": "unbounded",
+    "collateral_supply_cap_usd": 70000000.0
+   }
+  },
+  {
+   "id": "P2",
+   "position_key": "mkt_f5c5df2355",
+   "position_label": "Morpho wstETH/USDC (morpho_market_0xf5c5df2355)",
+   "position_usd": 3440501.99,
+   "mechanism": "isolated_market_collateral",
+   "chain": [
+    {
+     "edge": "VAULT_ALLOCATION",
+     "to": "morpho_market_0xf5c5df2355",
+     "to_label": "Morpho wstETH/USDC",
+     "fraction": 1.0,
+     "note": "share_pct 0.942% of assets, via adapter 0xc2a11ba5",
+     "sub": "$3,440,502",
+     "edge_sub": "0.96% of the portfolio"
+    },
+    {
+     "edge": "LENDING_COLLATERAL",
+     "to": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
+     "to_label": "wstETH (Lido Wrapped stETH)",
+     "fraction": 0.896437,
+     "note": "sole collateral, traversed INBOUND; supply share capped at 1.0 (allocation exceeds market supply by 14,900.52, 0.435%), so fraction = 3.084196M/3.440502M",
+     "sub": "not a proxy",
+     "edge_sub": "89.6% utilised"
+    },
+    {
+     "edge": "WRAP_UNWRAP",
+     "to": "0xae7ab96520de3a18e5e111b5eaab095312d7fe84",
+     "to_label": "stETH (Lido)",
+     "fraction": 1.0,
+     "note": "also BACKED_BY, both agree",
+     "sub": "LST base token"
+    },
+    {
+     "edge": "backing",
+     "to": "native",
+     "to_label": "ETH",
+     "fraction": 1.0,
+     "note": "stETH to ETH is NOT an edge in the graph; asserted externally, stETH is a 1:1 claim on staked ETH",
+     "sub": "not modelled onward",
+     "edge_sub": "not modelled in the graph"
+    }
+   ],
+   "exposure_usd": 3440501.99,
+   "loss_usd": 3084196.13,
+   "loss_basis": "supply share capped at 1.000000 x debt backed by wstETH 3,084,196.13 (isolated market)",
+   "ceiling": false,
+   "unresolved": false,
+   "defensive_borrowing": {
+    "existing_debt_usd": 3084196.13,
+    "collateral_usd": 18000000.0,
+    "lltv_pct": 86,
+    "available_liquidity_usd": 356305.86,
+    "borrow_cap_usd": null,
+    "new_collateral": "unbounded",
+    "collateral_supply_cap_usd": null
+   }
+  },
+  {
+   "id": "P3",
+   "position_key": "mkt_85d59152ee",
+   "position_label": "Morpho weETH/USDC, oracle channel",
+   "position_usd": 51211864.8,
+   "mechanism": "oracle",
+   "chain": [
+    {
+     "edge": "VAULT_ALLOCATION",
+     "to": "morpho_market_0x85d59152ee",
+     "to_label": "Morpho weETH/USDC",
+     "fraction": 1.0,
+     "sub": "$51,211,865",
+     "edge_sub": "14.23% of the portfolio"
+    },
+    {
+     "edge": "ORACLE_DEP",
+     "to": "0xbbbb2222222222222222222222222222222222bb",
+     "to_label": "MorphoChainlinkOracleV2",
+     "fraction": 1.0,
+     "note": "the only value_defining=true edge of 9; source oracle_bridge:morpho_market",
+     "sub": "sole price authority"
+    }
+   ],
+   "exposure_usd": 51211864.8,
+   "loss_usd": 51211864.8,
+   "loss_basis": "whole position if the ETH price path is wrong",
+   "ceiling": false,
+   "unresolved": false
+  },
+  {
+   "id": "P4",
+   "position_key": "mkt_f5c5df2355",
+   "position_label": "Morpho wstETH/USDC, oracle channel",
+   "position_usd": 3440501.99,
+   "mechanism": "oracle",
+   "chain": [
+    {
+     "edge": "VAULT_ALLOCATION",
+     "to": "morpho_market_0xf5c5df2355",
+     "to_label": "Morpho wstETH/USDC",
+     "fraction": 1.0,
+     "sub": "$3,440,502",
+     "edge_sub": "0.96% of the portfolio"
+    },
+    {
+     "edge": "ORACLE_DEP",
+     "to": "0xcccc3333333333333333333333333333333333cc",
+     "to_label": "MorphoChainlinkOracleV2",
+     "fraction": 1.0,
+     "note": "the only value_defining=true edge of 10; source oracle_bridge:morpho_market",
+     "sub": "sole price authority"
+    }
+   ],
+   "exposure_usd": 3440501.99,
+   "loss_usd": 3440501.99,
+   "loss_basis": "whole position if the ETH price path is wrong",
+   "ceiling": false,
+   "unresolved": false
+  }
+ ],
+ "intermediaries": [
+  {
+   "id": "0xdddd4444444444444444444444444444444444dd",
+   "label": "unlabelled adapter",
+   "what": "vault adapter contract",
+   "role": "the adapter_address on ALL 10 allocations, so 100% of deployed assets route through it. No label, no project, no ADMIN_CTRL edge: governance not modelled",
+   "paths": [
+    "P1",
+    "P2",
+    "P3",
+    "P4"
+   ],
+   "value_behind_usd": 305066833.76,
+   "timelock_seconds": 0,
+   "attach": "Example USDC Vault (synthetic figures)"
+  },
+  {
+   "id": "0xbbbbbbbbbb9cc5e90e3b3af64bdaf62c37eeffcb",
+   "label": "Morpho Blue singleton",
+   "what": "protocol singleton (AGGREGATE node)",
+   "role": "ADMIN_CTRL over both ETH markets, and the CUSTODY_VIA hub that actually custodies the collateral",
+   "paths": [
+    "P1",
+    "P2"
+   ],
+   "value_behind_usd": null,
+   "timelock_seconds": 0,
+   "attach": "Morpho weETH/USDC"
+  },
+  {
+   "id": "0xbbbb2222222222222222222222222222222222bb",
+   "label": "MorphoChainlinkOracleV2",
+   "what": "price oracle",
+   "role": "only value_defining feed on the weETH market (1 of 9). Wrong-price vector only",
+   "paths": [
+    "P3"
+   ],
+   "value_behind_usd": 51211864.8,
+   "timelock_seconds": null,
+   "attach": "Morpho weETH/USDC"
+  },
+  {
+   "id": "0xcccc3333333333333333333333333333333333cc",
+   "label": "MorphoChainlinkOracleV2",
+   "what": "price oracle",
+   "role": "only value_defining feed on the wstETH market (1 of 10). Wrong-price vector only",
+   "paths": [
+    "P4"
+   ],
+   "value_behind_usd": 3440501.99,
+   "timelock_seconds": null,
+   "attach": "Morpho wstETH/USDC"
+  }
+ ],
+ "unconnected": [
+  {
+   "position": "Morpho KBTC/USDC (0xe51f9aaad2), Kraken Wrapped BTC collateral",
+   "usd": 134966856.43,
+   "why": "BTC collateral, no path to ETH"
+  },
+  {
+   "position": "Morpho syrupUSDC/USDC (0xc962994552), Maple syrupUSDC collateral",
+   "usd": 75976176.37,
+   "why": "private-credit collateral, no path to ETH"
+  },
+  {
+   "position": "Idle USDC held by the vault contract",
+   "usd": 54794830.82,
+   "why": "denomination asset, undeployed"
+  },
+  {
+   "position": "Morpho LBTC/USDC (0x6a7e36eb08), Lombard Staked BTC collateral",
+   "usd": 3593766.37,
+   "why": "BTC collateral, no path to ETH"
+  },
+  {
+   "position": "Morpho cbBTC/USDC (0xd8a8e6667f), Coinbase Wrapped BTC collateral",
+   "usd": 2223701.81,
+   "why": "BTC collateral, no path to ETH"
+  },
+  {
+   "position": "Morpho WBTC/USDC (0xbe50eed784), Wrapped BTC collateral",
+   "usd": 1007068.8,
+   "why": "BTC collateral, no path to ETH"
+  },
+  {
+   "position": "Two zero-value markets (0x80fea13225, 0x631e64ae84)",
+   "usd": 1e-06,
+   "why": "allocated_usd is 0 or sub-cent"
+  }
+ ],
+ "bounded": [
+  {
+   "path": "Example USDC Vault -> morpho_market_0x90ef0c5a0d -> sUSDe -> USDe -> ?",
+   "resolved_usd": 0,
+   "upper_bound_usd": 20795970.36,
+   "missing": "sUSDe resolves to USDe via BACKED_BY, and USDe's collateral composition is NOT modelled: its only outbound backing edges are two BRIDGE_BACKED_BY, no BACKED_BY to any collateral asset. Ethena's published design is delta-neutral, long staked ETH plus short perp, so ETH going to zero does not mechanically imply sUSDe going to zero. The graph models neither leg. Upper bound shown is the market's total_borrowed_usd, i.e. the loss if sUSDe were fully impaired, and is NOT an ETH exposure estimate",
+   "position_usd": 32646897.18
+  }
+ ],
+ "common_cause": [
+  {
+   "node": "0x35fa164735182de50811e8e2e824cfb9b6118ac2",
+   "label": "ether.fi eETH admin key reach",
+   "shared_with": [
+    "weETH",
+    "eETH",
+    "the wider ether.fi LRT stack"
+   ],
+   "combined_usd": 5024355005.66,
+   "note": "max_key_value_usd on eETH. A drain vector on ether.fi governance, not an ETH price event. Different vector, do not add to the path total"
+  },
+  {
+   "node": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
+   "label": "Lido wstETH admin key reach",
+   "shared_with": [
+    "wstETH",
+    "stETH"
+   ],
+   "combined_usd": 8206551.39,
+   "note": "max_key_value_usd on wstETH, timelock_delay_seconds 0. Different vector, do not add"
+  }
+ ]
+}

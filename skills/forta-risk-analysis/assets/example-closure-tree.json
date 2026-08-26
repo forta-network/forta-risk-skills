@@ -1,0 +1,311 @@
+{
+ "_comment": "Illustrative example. Synthetic protocol and figures, used only to show the tree shape, the categories and the flags. Replace everything.",
+ "title": "Example Lending Protocol (synthetic figures)",
+ "scope": "all markets scoped on lending_protocol",
+ "nav": 375500000,
+ "snapshot": "14 Aug 2026",
+ "floor": "$1M",
+ "headline": [
+  "1",
+  "key reaching 100% of protocol supply"
+ ],
+ "positions": {
+  "mkt-usdc-a": 152300000,
+  "mkt-usdc-b": 114600000,
+  "mkt-weth-a": 61400000,
+  "mkt-wbtc-a": 38200000,
+  "sub-floor": 9000000
+ },
+ "tree": [
+  {
+   "name": "Internal contracts: the protocol's own code",
+   "cat": "internal",
+   "typ": "contract",
+   "ctrl": "see children",
+   "note": "Contracts the protocol wrote and can fix, as distinct from the assets and feeds it merely calls",
+   "pos": [],
+   "kids": [
+    {
+     "name": "Vault connector, entity-wide",
+     "addr": "0x1111aa...0001",
+     "cat": "internal / core",
+     "typ": "contract",
+     "ctrl": "upgradeable, proxy admin below",
+     "mech": "bug in code",
+     "flag": "crit",
+     "note": "Every market routes through this contract, so it reaches all supply including the sub-floor remainder",
+     "pos": [
+      "mkt-usdc-a",
+      "mkt-usdc-b",
+      "mkt-weth-a",
+      "mkt-wbtc-a",
+      "sub-floor"
+     ],
+     "kids": [
+      {
+       "name": "Proxy admin",
+       "addr": "0x1111aa...0002",
+       "cat": "internal / governance",
+       "typ": "contract",
+       "ctrl": "sole admin, timelock 0",
+       "mech": "implementation swap",
+       "flag": "crit",
+       "pos": [
+        "mkt-usdc-a",
+        "mkt-usdc-b",
+        "mkt-weth-a",
+        "mkt-wbtc-a",
+        "sub-floor"
+       ],
+       "kids": [
+        {
+         "name": "Governance Safe",
+         "addr": "0x1111aa...0003",
+         "cat": "internal / governance",
+         "typ": "multisig",
+         "ctrl": "threshold 1 of 1, probe ok, timelock 0",
+         "mech": "key compromise",
+         "flag": "crit",
+         "note": "Threshold measured, not inferred: a single signature can replace the implementation with no delay",
+         "pos": [
+          "mkt-usdc-a",
+          "mkt-usdc-b",
+          "mkt-weth-a",
+          "mkt-wbtc-a",
+          "sub-floor"
+         ],
+         "kids": [
+          {
+           "name": "Terminal key",
+           "addr": "0x1111aa...0004",
+           "cat": "internal / governance",
+           "typ": "EOA",
+           "ctrl": "single private key",
+           "mech": "key compromise",
+           "flag": "eoa",
+           "note": "A single private key sits above every market through the connector's proxy admin, with no timelock at any hop",
+           "pos": [
+            "mkt-usdc-a",
+            "mkt-usdc-b",
+            "mkt-weth-a",
+            "mkt-wbtc-a",
+            "sub-floor"
+           ]
+          }
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "name": "Market governor, two markets",
+     "addr": "0x1111aa...0010",
+     "cat": "internal / core",
+     "typ": "contract",
+     "ctrl": "sets caps, fees and the oracle per market",
+     "mech": "bug in code",
+     "flag": "warn",
+     "pos": [
+      "mkt-weth-a",
+      "mkt-wbtc-a"
+     ],
+     "kids": [
+      {
+       "name": "Operations Safe",
+       "addr": "0x1111aa...0011",
+       "cat": "internal / governance",
+       "typ": "multisig",
+       "ctrl": "threshold 4 of 7, probe ok, 48h timelock",
+       "mech": "key compromise",
+       "flag": "ok",
+       "pos": [
+        "mkt-weth-a",
+        "mkt-wbtc-a"
+       ]
+      }
+     ]
+    },
+    {
+     "name": "Interest rate model",
+     "addr": "0x1111aa...0020",
+     "cat": "internal / periphery",
+     "typ": "contract",
+     "ctrl": "immutable, admin_roles empty with discovery status ok",
+     "mech": "bug in code",
+     "flag": "ok",
+     "note": "Verified absence of admin control, which is a genuine strength and worth stating",
+     "pos": [
+      "mkt-usdc-a",
+      "mkt-usdc-b",
+      "mkt-weth-a",
+      "mkt-wbtc-a"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "External assets and their own control planes",
+   "cat": "external / assets",
+   "typ": "asset",
+   "ctrl": "see children",
+   "note": "The protocol can monitor these but cannot fix them",
+   "pos": [],
+   "kids": [
+    {
+     "name": "USDC, denomination asset of two markets",
+     "addr": "0xa0b869...eb48",
+     "cat": "external / assets",
+     "typ": "asset",
+     "ctrl": "15 admins across 2 subcategories, real control set",
+     "mech": "freeze",
+     "flag": "crit",
+     "note": "Not a leaf: the roles beneath it are the loss paths",
+     "pos": [
+      "mkt-usdc-a",
+      "mkt-usdc-b"
+     ],
+     "kids": [
+      {
+       "name": "Blacklister role",
+       "addr": "0xa0b869...aa01",
+       "cat": "external / assets",
+       "typ": "contract",
+       "ctrl": "role holder",
+       "mech": "freeze",
+       "flag": "crit",
+       "note": "Can strand the protocol's entire balance with no exploit and no protocol involvement",
+       "pos": [
+        "mkt-usdc-a",
+        "mkt-usdc-b"
+       ]
+      },
+      {
+       "name": "Master minter and its own owner",
+       "addr": "0xa0b869...aa02",
+       "cat": "external / assets",
+       "typ": "contract",
+       "ctrl": "role holder, own owner one hop below",
+       "mech": "mint",
+       "flag": "warn",
+       "pos": [
+        "mkt-usdc-a",
+        "mkt-usdc-b"
+       ]
+      },
+      {
+       "name": "Token proxy admin",
+       "addr": "0xa0b869...aa03",
+       "cat": "external / assets",
+       "typ": "contract",
+       "ctrl": "upgrade authority",
+       "mech": "implementation swap",
+       "flag": "warn",
+       "pos": [
+        "mkt-usdc-a",
+        "mkt-usdc-b"
+       ]
+      }
+     ]
+    },
+    {
+     "name": "WETH, collateral of one market",
+     "addr": "0xc02aaa...6cc2",
+     "cat": "external / assets",
+     "typ": "asset",
+     "ctrl": "immutable, admin_roles empty with discovery status ok",
+     "mech": "bug in code",
+     "flag": "ok",
+     "note": "Verified absence of admin control",
+     "pos": [
+      "mkt-weth-a"
+     ]
+    },
+    {
+     "name": "Wrapped BTC, collateral of one market",
+     "addr": "0x2260fa...c599",
+     "cat": "external / assets",
+     "typ": "asset",
+     "ctrl": "single controller admin",
+     "mech": "custodial failure",
+     "flag": "warn",
+     "note": "Custody of the underlying BTC is an off-chain arrangement with the merchant and custodian network",
+     "pos": [
+      "mkt-wbtc-a"
+     ]
+    },
+    {
+     "name": "Role registry, not expanded",
+     "addr": "0x0d3747...bb56",
+     "cat": "unconfirmed",
+     "typ": "unconfirmed",
+     "ctrl": "287 inbound admins across 5 subcategories",
+     "mech": "key compromise",
+     "flag": "unconfirmed",
+     "note": "Inbound admin degree marks this as a role registry rather than a control set, so it is recorded with its degree and left unexpanded. Expanding it would inject unrelated parties from other protocols into the closure",
+     "pos": []
+    }
+   ]
+  },
+  {
+   "name": "Price feeds",
+   "cat": "external / oracles",
+   "typ": "oracle",
+   "ctrl": "see children",
+   "pos": [],
+   "kids": [
+    {
+     "name": "USD price feed, shared by both USDC markets",
+     "addr": "0x8fffff...18f6",
+     "cat": "external / oracles",
+     "typ": "oracle",
+     "ctrl": "feed admin set, threshold 4",
+     "mech": "stale or manipulated price",
+     "flag": "warn",
+     "note": "Pair inferred from the address: feed nodes carry no pair identification",
+     "pos": [
+      "mkt-usdc-a",
+      "mkt-usdc-b"
+     ]
+    },
+    {
+     "name": "Collateral feeds, price authority not confirmed per market",
+     "addr": "2 addresses",
+     "cat": "external / oracles",
+     "typ": "oracle",
+     "ctrl": "candidates listed, not confirmed to a single feed on-chain",
+     "mech": "stale or manipulated price",
+     "flag": "unconfirmed",
+     "note": "Admins over the feed set as a whole are ranked below, which is sound; the per-market attribution is not confirmed",
+     "pos": [
+      "mkt-weth-a",
+      "mkt-wbtc-a"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Counterparties",
+   "cat": "counterparty",
+   "typ": "contract",
+   "ctrl": "see children",
+   "note": "Not contracts, but the primary lender loss path",
+   "pos": [],
+   "kids": [
+    {
+     "name": "Largest borrower, grouped by owner prefix across 6 sub-accounts",
+     "addr": "0x9999cc...0001",
+     "cat": "counterparty",
+     "typ": "EOA",
+     "ctrl": "single owner",
+     "mech": "liquidation shortfall",
+     "flag": "warn",
+     "note": "Sub-accounts grouped before ranking: ungrouped, this concentration reads roughly 4x too low",
+     "pos": [
+      "mkt-usdc-a"
+     ]
+    }
+   ]
+  }
+ ]
+}

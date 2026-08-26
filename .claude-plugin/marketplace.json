@@ -1,0 +1,16 @@
+{
+  "$schema": "https://code.claude.com/schemas/marketplace.json",
+  "name": "forta-risk",
+  "owner": {
+    "name": "Forta / OpenZeppelin",
+    "url": "https://github.com/forta-network/forta-risk-skills"
+  },
+  "plugins": [
+    {
+      "name": "forta-risk",
+      "source": "./",
+      "description": "Skills for the Forta Risk Graph MCP — on-chain dependency concentration, control closure and blast radius for tokenized assets.",
+      "category": "data"
+    }
+  ]
+}

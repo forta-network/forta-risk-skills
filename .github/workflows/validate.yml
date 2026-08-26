@@ -1,0 +1,30 @@
+name: validate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  skills:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Structural lint
+        run: ./scripts/validate-skills.sh
+
+      # Skills ship against production. A non-production hostname in skills/ is
+      # always a bug: it indexes a different partition, so the figures are not
+      # comparable and nothing warns.
+      - name: Production endpoint only
+        run: |
+          if grep -rnE 'stage\.forta\.network|localhost|127\.0\.0\.1' skills/; then
+            echo "::error::skills/ must target production only"
+            exit 1
+          fi
+
+      - name: Report builders run
+        run: |
+          for s in skills/forta-risk-analysis/scripts/*.py; do
+            python3 "$s" --schema >/dev/null || { echo "::error::$s --schema failed"; exit 1; }
+          done

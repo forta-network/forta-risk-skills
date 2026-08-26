@@ -1,0 +1,195 @@
+{
+ "_comment": "Illustrative reverse-impact example. Synthetic subject and figures. Note the three separate tables: the ranked union, additive dollars, and re-attribution which must never be added.",
+ "entity": {
+  "name": "Example wrapped BTC token (synthetic figures)",
+  "address": "0xEXAMPLE00000000000000000000000000000002",
+  "chain": "Ethereum mainnet",
+  "type": "Custodial wrapped asset",
+  "snapshot": "14 Aug 2026",
+  "mode": "impact"
+ },
+ "totals": {
+  "nav": 7520000000
+ },
+ "positions": {
+  "mm-a-collat": 116600000,
+  "mm-b-collat": 74300000,
+  "mm-c-collat": 41200000,
+  "pool-1": 38900000,
+  "pool-2": 12400000,
+  "bridge-1": 6300000,
+  "tail": 4200000
+ },
+ "groups": [
+  {
+   "name": "Money market A",
+   "note": "Union across the market, its oracle and its admin set: the same underlying position",
+   "deps": [
+    {
+     "name": "Market collateral position",
+     "layer": "Lending",
+     "hops": 2,
+     "addr": "0xaaaa11...0001",
+     "positions": [
+      "mm-a-collat"
+     ]
+    },
+    {
+     "name": "Market oracle, price authority confirmed",
+     "layer": "Oracle",
+     "hops": 3,
+     "addr": "0xaaaa11...0002",
+     "positions": [
+      "mm-a-collat"
+     ]
+    },
+    {
+     "name": "Market admin, threshold 4 with a 48h timelock",
+     "layer": "Admin",
+     "hops": 3,
+     "addr": "0xaaaa11...0003",
+     "positions": [
+      "mm-a-collat"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Money market B",
+   "note": "Multi-collateral pool, pro-rated at the subject's 47.8% share of the market's collateral",
+   "deps": [
+    {
+     "name": "Market collateral position, pro-rated share",
+     "layer": "Lending",
+     "hops": 2,
+     "addr": "0xbbbb22...0001",
+     "positions": [
+      "mm-b-collat"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Money market C",
+   "note": "Isolated market, single collateral type",
+   "deps": [
+    {
+     "name": "Market collateral position",
+     "layer": "Lending",
+     "hops": 2,
+     "addr": "0xcccc33...0001",
+     "positions": [
+      "mm-c-collat"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "AMM pools",
+   "note": "LP loss is the whole pool, not the subject's leg: a worthless asset is arbitraged against the paired asset. Applies to AMMs only",
+   "deps": [
+    {
+     "name": "Pool 1, both legs",
+     "layer": "AMM",
+     "hops": 2,
+     "addr": "0xdddd44...0001",
+     "positions": [
+      "pool-1"
+     ]
+    },
+    {
+     "name": "Pool 2, both legs",
+     "layer": "AMM",
+     "hops": 2,
+     "addr": "0xdddd44...0002",
+     "positions": [
+      "pool-2"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Bridges",
+   "note": "Bridged representations of the subject on other chains",
+   "deps": [
+    {
+     "name": "Bridge lockbox balance",
+     "layer": "Bridge",
+     "hops": 2,
+     "addr": "0xffff66...0001",
+     "positions": [
+      "bridge-1"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Positions below the floor, carried as one aggregate",
+   "note": "Everything under 0.1% of the denominator, kept in the total rather than dropped",
+   "deps": [
+    {
+     "name": "Aggregate of 34 sub-floor holders",
+     "layer": "Mixed",
+     "hops": 2,
+     "positions": [
+      "tail"
+     ]
+    }
+   ]
+  }
+ ],
+ "additive": [
+  {
+   "path": "Money market C bad debt",
+   "layer": "Lending",
+   "hops": 2,
+   "usd": 28400000,
+   "note": "isolated market, bad debt equals the amount borrowed against the subject"
+  },
+  {
+   "path": "Pool 1 counter-leg drained by arbitrage",
+   "layer": "AMM",
+   "hops": 2,
+   "usd": 19300000,
+   "note": "paired asset, denominated in something other than the subject"
+  },
+  {
+   "path": "Money market A borrow ceiling against this collateral",
+   "layer": "Lending",
+   "hops": 2,
+   "usd": 62000000,
+   "note": "ceiling, not a measurement: the drawn amount against this specific collateral is not exposed by the protocol"
+  }
+ ],
+ "reattribution": [
+  {
+   "layer": "Receipt tokens over the same deposits",
+   "usd": 232100000,
+   "resolves": "holders of the money markets' receipt tokens, the same dollars as the ranked table"
+  },
+  {
+   "layer": "Vaults supplying the affected markets",
+   "usd": 9100000,
+   "resolves": "vault depositors, whose loss is already inside the money market rows above"
+  },
+  {
+   "layer": "Bridged supply on other chains",
+   "usd": 6300000,
+   "resolves": "holders of the bridged representation, the same dollars as the bridge row"
+  }
+ ],
+ "backing_exposure": [
+  {
+   "asset": "Stablecoin A",
+   "mechanism": "CDP collateral",
+   "share_pct": 0.282,
+   "basis": "collateral-backed debt summed across all controllers, not total supply"
+  },
+  {
+   "asset": "Stablecoin B",
+   "mechanism": "CDP collateral",
+   "share_pct": 47.3,
+   "basis": "collateral-backed debt across all controllers. At this share the path propagates at close to full value"
+  }
+ ]
+}

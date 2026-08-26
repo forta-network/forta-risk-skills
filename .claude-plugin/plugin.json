@@ -1,0 +1,19 @@
+{
+  "$schema": "https://code.claude.com/schemas/plugin.json",
+  "name": "forta-risk",
+  "version": "0.1.0",
+  "description": "Skills for the Forta Risk Graph MCP. Answer on-chain risk questions — what could make this lose money, who can take user funds, who is exposed if this fails — against a live graph of positions, governance, oracles and lending markets.",
+  "author": {
+    "name": "Forta / OpenZeppelin",
+    "url": "https://forta.org"
+  },
+  "homepage": "https://github.com/forta-network/forta-risk-skills",
+  "keywords": [
+    "defi",
+    "risk",
+    "onchain",
+    "ethereum",
+    "tokenized-assets",
+    "graph"
+  ]
+}

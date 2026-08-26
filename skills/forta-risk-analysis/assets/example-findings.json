@@ -1,0 +1,370 @@
+{
+ "_comment": "Illustrative example. Synthetic entity and figures, used only to show the schema and the shape of a finished report. Replace everything.",
+ "entity": {
+  "name": "Example USDC Yield Vault (synthetic figures)",
+  "address": "0xEXAMPLE00000000000000000000000000000001",
+  "chain": "Ethereum mainnet",
+  "type": "ERC-4626 vault",
+  "snapshot": "14 Aug 2026",
+  "mode": "dependency"
+ },
+ "totals": {
+  "nav": 96670447,
+  "deployed": 78352209,
+  "idle": 18318238
+ },
+ "positions": {
+  "mkt-a": 71069934.02,
+  "mkt-b": 2614089.55,
+  "mkt-c": 1870893.98,
+  "mkt-d": 1583241.5,
+  "mkt-e": 746052.76,
+  "mkt-f": 456154.51,
+  "mkt-g": 11842.45
+ },
+ "exposure": [
+  {
+   "name": "WBTC / USDC market",
+   "key": "mkt-a",
+   "collateral": "WBTC",
+   "bucket": "BTC"
+  },
+  {
+   "name": "wstETH / USDC market",
+   "key": "mkt-b",
+   "collateral": "wstETH",
+   "bucket": "ETH"
+  },
+  {
+   "name": "WETH / USDC market",
+   "key": "mkt-c",
+   "collateral": "WETH",
+   "bucket": "ETH"
+  },
+  {
+   "name": "cbBTC / USDC market",
+   "key": "mkt-d",
+   "collateral": "cbBTC",
+   "bucket": "BTC"
+  },
+  {
+   "name": "wstETH / USDC market (second)",
+   "key": "mkt-e",
+   "collateral": "wstETH",
+   "bucket": "ETH"
+  },
+  {
+   "name": "WBTC / USDC market (small)",
+   "key": "mkt-f",
+   "collateral": "WBTC",
+   "bucket": "BTC"
+  },
+  {
+   "name": "cbBTC / USDC market (small)",
+   "key": "mkt-g",
+   "collateral": "cbBTC",
+   "bucket": "BTC"
+  }
+ ],
+ "buckets": [
+  {
+   "name": "BTC collateral (WBTC + cbBTC)",
+   "keys": [
+    "mkt-a",
+    "mkt-f",
+    "mkt-d",
+    "mkt-g"
+   ]
+  },
+  {
+   "name": "ETH collateral (WETH + wstETH)",
+   "keys": [
+    "mkt-c",
+    "mkt-b",
+    "mkt-e"
+   ]
+  }
+ ],
+ "groups": [
+  {
+   "name": "Vault contract and curator roles",
+   "note": "Reaches every asset including idle, so it sits above the market layer",
+   "deps": [
+    {
+     "name": "Vault contract (the entity itself)",
+     "layer": "Vault",
+     "hops": 0,
+     "entity_wide": true
+    },
+    {
+     "name": "Curator and allocator roles, threshold 1, timelock 0",
+     "layer": "Vault",
+     "hops": 0,
+     "entity_wide": true
+    }
+   ]
+  },
+  {
+   "name": "USDC (denomination asset)",
+   "note": "Loan asset for all seven markets, plus the idle buffer",
+   "deps": [
+    {
+     "name": "USDC token",
+     "layer": "Denomination asset",
+     "hops": 1,
+     "addr": "0xa0b869...eb48",
+     "entity_wide": true
+    },
+    {
+     "name": "USDC admin set: owner, master minter, minters, mint forwarder (13 addresses)",
+     "layer": "Asset admin",
+     "hops": 2,
+     "entity_wide": true
+    },
+    {
+     "name": "USDC blacklister role, can freeze the vault's balance",
+     "layer": "Asset admin",
+     "hops": 2,
+     "entity_wide": true
+    }
+   ]
+  },
+  {
+   "name": "Lending protocol singleton",
+   "note": "One contract is custodian of all seven markets",
+   "deps": [
+    {
+     "name": "Protocol singleton contract",
+     "layer": "Protocol",
+     "hops": 1,
+     "addr": "0xbbbbbb...effcb",
+     "positions": [
+      "mkt-a",
+      "mkt-b",
+      "mkt-c",
+      "mkt-d",
+      "mkt-e",
+      "mkt-f",
+      "mkt-g"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "BTC/USD price feed (shared)",
+   "note": "Shared price input across the WBTC and cbBTC markets, so it sits at top level rather than inside either family",
+   "deps": [
+    {
+     "name": "BTC/USD aggregator, pair inferred from the address",
+     "layer": "Oracle feed",
+     "hops": 3,
+     "addr": "0xf40300...e88c",
+     "positions": [
+      "mkt-a",
+      "mkt-d"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "WBTC",
+   "note": "Collateral of the 90.7% main market and one small market. Custody of the underlying BTC is an off-chain arrangement with the merchant and custodian network",
+   "deps": [
+    {
+     "name": "WBTC token",
+     "layer": "Collateral",
+     "hops": 2,
+     "addr": "0x2260fa...c599",
+     "positions": [
+      "mkt-a",
+      "mkt-f"
+     ]
+    },
+    {
+     "name": "WBTC controller admin",
+     "layer": "Collateral admin",
+     "hops": 3,
+     "addr": "0xca0641...beb7",
+     "positions": [
+      "mkt-a",
+      "mkt-f"
+     ]
+    },
+    {
+     "name": "Custodian of the underlying BTC (off-chain arrangement)",
+     "layer": "Counterparty",
+     "hops": 3,
+     "positions": [
+      "mkt-a",
+      "mkt-f"
+     ]
+    },
+    {
+     "name": "Main market oracle, price authority confirmed",
+     "layer": "Oracle",
+     "hops": 1,
+     "addr": "0xdddd77...9b83",
+     "positions": [
+      "mkt-a"
+     ]
+    },
+    {
+     "name": "Small market oracle, candidates listed, not confirmed to a single feed on-chain",
+     "layer": "Oracle",
+     "hops": 1,
+     "addr": "0xf1561b...8cf4",
+     "positions": [
+      "mkt-f"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "wstETH and its staking layer",
+   "note": "Collateral of two markets, four hops deep through stETH",
+   "deps": [
+    {
+     "name": "wstETH token",
+     "layer": "Collateral",
+     "hops": 2,
+     "addr": "0x7f39c5...2ca0",
+     "positions": [
+      "mkt-b",
+      "mkt-e"
+     ]
+    },
+    {
+     "name": "stETH (wstETH unwraps to it)",
+     "layer": "Collateral (nested)",
+     "hops": 3,
+     "addr": "0xae7ab9...fe84",
+     "positions": [
+      "mkt-b",
+      "mkt-e"
+     ]
+    },
+    {
+     "name": "stETH admin set, 4 control addresses",
+     "layer": "Collateral admin",
+     "hops": 4,
+     "positions": [
+      "mkt-b",
+      "mkt-e"
+     ]
+    },
+    {
+     "name": "Staking protocol validator set",
+     "layer": "Counterparty",
+     "hops": 4,
+     "positions": [
+      "mkt-b",
+      "mkt-e"
+     ]
+    },
+    {
+     "name": "wstETH price feed, shared by both market oracles",
+     "layer": "Oracle feed",
+     "hops": 3,
+     "addr": "0x4f67e4...4e79",
+     "positions": [
+      "mkt-b",
+      "mkt-e"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Native ETH",
+   "note": "Backs WETH 1:1 and backs stETH through staking",
+   "deps": [
+    {
+     "name": "Native ETH",
+     "layer": "Base asset",
+     "hops": 3,
+     "addr": "node id: native",
+     "positions": [
+      "mkt-c",
+      "mkt-b",
+      "mkt-e"
+     ]
+    },
+    {
+     "name": "ETH/USD aggregator, shared by the WETH and wstETH market oracles",
+     "layer": "Oracle feed",
+     "hops": 3,
+     "addr": "0xc0053f...73ad",
+     "positions": [
+      "mkt-b",
+      "mkt-c"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "cbBTC",
+   "note": "Collateral of two small markets. Custody of the underlying BTC is an off-chain arrangement with the issuer",
+   "deps": [
+    {
+     "name": "cbBTC token",
+     "layer": "Collateral",
+     "hops": 2,
+     "addr": "0xcbb7c0...33bf",
+     "positions": [
+      "mkt-d",
+      "mkt-g"
+     ]
+    },
+    {
+     "name": "cbBTC admin set, 8 addresses including a mint forwarder",
+     "layer": "Collateral admin",
+     "hops": 3,
+     "positions": [
+      "mkt-d",
+      "mkt-g"
+     ]
+    },
+    {
+     "name": "Issuer custody of the underlying BTC (off-chain arrangement)",
+     "layer": "Counterparty",
+     "hops": 3,
+     "positions": [
+      "mkt-d",
+      "mkt-g"
+     ]
+    }
+   ]
+  }
+ ],
+ "supplier_concentration": [
+  {
+   "market": "WBTC/USDC main mkt-a",
+   "market_supply": 104024336,
+   "our_supply": 71069934,
+   "largest_other_pct": 8.5
+  },
+  {
+   "market": "WBTC/USDC small mkt-f",
+   "market_supply": 459222,
+   "our_supply": 456155,
+   "largest_other_pct": 0.4
+  },
+  {
+   "market": "wstETH/USDC mkt-b",
+   "market_supply": 3382618,
+   "our_supply": 2614090,
+   "largest_other_pct": 15.0
+  },
+  {
+   "market": "WETH/USDC mkt-c",
+   "market_supply": 3237627,
+   "our_supply": 1870894,
+   "largest_other_pct": 38.0
+  },
+  {
+   "market": "cbBTC/USDC mkt-d",
+   "market_supply": 190815574,
+   "our_supply": 1583241,
+   "largest_other_pct": 37.8
+  }
+ ]
+}
