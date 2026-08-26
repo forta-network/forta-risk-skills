@@ -816,6 +816,12 @@ def defensive_borrow(d):
     if not d:
         return 0.0, "", []
     debt = float(d.get("existing_debt_usd") or 0)
+    # The debt SECURED BY the collateral asset is not always the loss booked on
+    # this one path: one collateral family can back debt drawn across several
+    # reserves. collateral_debt_usd carries that figure when they differ; the
+    # loss base stays existing_debt_usd.
+    cdebt = d.get("collateral_debt_usd")
+    cdebt = debt if cdebt is None else float(cdebt)
     col = d.get("collateral_usd")
     lltv = d.get("lltv_pct")
     newc = d.get("new_collateral")            # None | "unbounded" | usd number
@@ -825,37 +831,57 @@ def defensive_borrow(d):
     if col is not None and lltv is not None:
         lt = float(lltv) / 100.0
         posted = float(col)
-        floor = max(posted * lt - debt, 0.0)
+        floor = max(posted * lt - cdebt, 0.0)
         terms.append(("collateral already posted", floor,
-                      "%s posted x %.0f%% LLTV, less %s already drawn"
-                      % (money(posted), float(lltv), money(debt))))
+                      "%s posted x %.0f%% LLTV, less %s already drawn against it"
+                      % (money(posted), float(lltv), money(cdebt))))
         collateral_room = floor
         if newc is not None:
             if ccap is not None:
                 postable = max(float(ccap) - posted, 0.0)
-                room = max((posted + postable) * lt - debt, 0.0)
+                room = max((posted + postable) * lt - cdebt, 0.0)
                 why = ("collateral is capped at %s in total, so at most %s more can "
                        "be posted" % (money(ccap), money(postable)))
             elif newc == "unbounded":
-                room, why = INF, ("nothing caps how much collateral can be posted, so "
-                                  "this constraint does not bind")
+                if lt <= 0:
+                    room = 0.0
+                    why = ("the asset carries a zero LLTV, so posting more of it buys no "
+                           "borrowing power however much is posted")
+                else:
+                    room, why = INF, ("nothing caps how much collateral can be posted, so "
+                                      "this constraint does not bind")
             else:
-                room = max((posted + float(newc)) * lt - debt, 0.0)
-                why = "assumes a further %s of collateral is posted" % money(newc)
+                room = max((posted + float(newc)) * lt - cdebt, 0.0)
+                why = (d.get("collateral_basis")
+                       or "assumes a further %s of collateral is posted" % money(newc))
             terms.append(("collateral that could still be posted", room, why))
             collateral_room = room
 
     liq = d.get("available_liquidity_usd")
     if liq is not None:
         terms.append(("available liquidity", max(float(liq), 0.0),
-                      "what is actually left in the market to lend"))
+                      d.get("liquidity_basis")
+                      or "what is actually left in the market to lend"))
 
     cap = d.get("borrow_cap_usd")
-    terms.append(("borrow cap headroom",
-                  max(float(cap) - debt, 0.0) if cap is not None else INF,
-                  ("%s borrow cap, less %s already drawn" % (money(cap), money(debt)))
-                  if cap is not None
-                  else "this market has no borrow cap, so nothing caps the draw here"))
+    head = d.get("borrow_cap_headroom_usd")
+    if head is not None:
+        # Some protocols cap per reserve, so the headroom a draw actually faces is
+        # a sum over the reserves it can reach, not one cap minus one debt.
+        terms.append(("borrow cap headroom", max(float(head), 0.0),
+                      d.get("borrow_cap_basis")
+                      or "cap headroom summed over the reserves this draw can reach"))
+    elif cap == "unknown":
+        terms.append(("borrow cap headroom", INF,
+                      "a borrow cap is not readable here, so this constraint is "
+                      "unquantified rather than absent, and the draw below is an "
+                      "upper bound on what the caps would actually permit"))
+    else:
+        terms.append(("borrow cap headroom",
+                      max(float(cap) - debt, 0.0) if cap is not None else INF,
+                      ("%s borrow cap, less %s already drawn" % (money(cap), money(debt)))
+                      if cap is not None
+                      else "this market has no borrow cap, so nothing caps the draw here"))
 
     # the floor row is context, not a constraint, once new collateral is admitted
     binding_pool = [t for t in terms if t[0] != "collateral already posted"] \
@@ -874,7 +900,8 @@ def render_defensive(f, c):
     paths.sort(key=lambda p: -_rush_loss(p))
     if not paths:
         return ""
-    h = ['<h2>2. Defensive borrowing: what the loss becomes in a rush</h2>']
+    n = 3 if (f.get("incidence") or {}).get("bearers") else 2
+    h = ['<h2>%d. Defensive borrowing: what the loss becomes in a rush</h2>' % n]
     h.append('<p class="note">An asset known to be failing keeps its old price until the '
              'market oracle catches up. In that window the rational move for anyone '
              'holding it is to post it as collateral, borrow whatever the market will '
@@ -888,11 +915,13 @@ def render_defensive(f, c):
         d = p["defensive_borrowing"]
         extra, binding, terms = defensive_borrow(d)
         base = float(d.get("existing_debt_usd") or 0)
+        drawn = d.get("collateral_debt_usd")
+        drawn = base if drawn is None else float(drawn)
         tot_base += base
         tot_extra += extra
         h.append('<tr><td rowspan="%d"><b>%s</b><div class="note">already drawn %s</div>'
                  "</td>" % (len(terms) + 1, escape(p.get("position_label")
-                                                   or p.get("id") or ""), money(base)))
+                                                   or p.get("id") or ""), money(drawn)))
         for k, (nm, val, why) in enumerate(terms):
             b = nm == binding
             cell = ('<td>%s%s</td><td class="n">%s</td><td class="note">%s</td></tr>'
@@ -904,15 +933,93 @@ def render_defensive(f, c):
                  '<td class="n">%s</td>'
                  '<td class="note">the smallest of the constraints above</td></tr>'
                  % money(extra))
+    # The footer must agree with the headline cards by construction. Summing
+    # existing_debt_usd over the defensive rows only does NOT: a position whose
+    # loss arrives by some other mechanism, or one that wins its key without a
+    # defensive block, is in the headline and not in that sum, so the two
+    # figures drift apart and the report states its own loss twice, differently.
+    base = float(c.get("total_loss") or tot_base)
+    rush = float(c.get("rush_loss") or (base + tot_extra))
     h.append('</tbody><tfoot><tr><td>Current estimated loss</td>'
-             '<td colspan="2" class="n">%s</td><td class="note">debt already drawn</td></tr>'
+             '<td colspan="2" class="n">%s</td>'
+             '<td class="note">every path in section 1, at the amounts borrowed today</td></tr>'
              '<tr><td>Extra borrowing under a rush</td><td colspan="2" class="n">%s</td>'
              '<td class="note">added to the loss</td></tr>'
              '<tr><td><b>Maximum loss</b></td>'
              '<td colspan="2" class="n"><b>%s</b></td>'
              '<td class="note">%s of the portfolio</td></tr></tfoot></table>'
-             % (money(tot_base), money(tot_extra), money(tot_base + tot_extra),
-                pct((tot_base + tot_extra) / c["assets"] * 100 if c["assets"] else 0)))
+             % (money(base), money(rush - base), money(rush),
+                pct(rush / c["assets"] * 100 if c["assets"] else 0)))
+    return "".join(h)
+
+
+def render_incidence(f, c):
+    """Who actually bears the loss.
+
+    A path table says where the money sits and what it is worth after the
+    failure. On a pooled cross-collateral protocol that is not the same question
+    as who is out of pocket: a levered depositor abandons a position rather than
+    repaying it, and the shortfall lands on people who never touched the failing
+    asset. Those dollars are a REDISTRIBUTION of the path total, never an
+    addition to it, so this section is checked against the path total and never
+    summed with it.
+    """
+    inc = f.get("incidence")
+    if not inc:
+        return ""
+    rows = inc.get("bearers") or []
+    if not rows:
+        return ""
+    h = ['<h2>%s</h2>' % escape(inc.get("title")
+                                or "Who bears the loss")]
+    if inc.get("note"):
+        h.append('<p class="note">%s</p>' % escape(inc["note"]))
+    h.append('<table><thead><tr><th>Bears the loss</th><th>How it reaches them</th>'
+             '<th class="n">Loss</th><th class="n">Share</th></tr></thead><tbody>')
+    tot = sum(float(r.get("usd") or 0) for r in rows)
+    for r in sorted(rows, key=lambda r: -float(r.get("usd") or 0)):
+        v = float(r.get("usd") or 0)
+        h.append('<tr><td><b>%s</b></td><td>%s</td><td class="n">%s</td>'
+                 '<td class="n">%s</td></tr>'
+                 % (escape(r.get("who") or ""), escape(r.get("how") or ""),
+                    money(v), pct(v / tot * 100 if tot else 0)))
+        if r.get("basis"):
+            h.append('<tr class="basis"><td></td><td class="note" colspan="3">%s</td></tr>'
+                     % escape(r["basis"]))
+    h.append('</tbody><tfoot><tr><td colspan="2">Total</td><td class="n">%s</td>'
+             '<td class="n">%s</td></tr></tfoot></table>' % (money(tot), pct(100.0)))
+    tl = float(c.get("total_loss") or 0)
+    drift = abs(tot - tl) / tl * 100 if tl else 0
+    h.append('<div class="%s"><b>Incidence check.</b> The bearers above account for %s '
+             'against the %s of loss in section 1, %.2f%% apart. These are the same '
+             'dollars seen by who loses them, so they are never added to the path '
+             'total.%s</div>'
+             % ("note" if drift <= 1.0 else "warn", money(tot), money(tl), drift,
+                "" if drift <= 1.0 else " <b>This does not close.</b>"))
+    return "".join(h)
+
+
+def render_common_cause(f, c, n):
+    rows = f.get("common_cause") or []
+    if not rows:
+        return ""
+    h = ['<h2>%d. Common cause: what a shared issuer or admin would add</h2>' % n]
+    h.append('<p class="note">These assets do not depend on the subject and are held out of '
+             'every figure above. They are here because one compromise upstream of both would '
+             'reach them too, which is a different assumption from the one this report makes '
+             'and produces a different number. Never added to the path total.</p>')
+    h.append('<table><thead><tr><th>Shared point</th><th>Also reaches</th>'
+             '<th class="n">Held in portfolio</th></tr></thead><tbody>')
+    for r in rows:
+        h.append('<tr><td><b>%s</b><div class="note mono">%s</div></td><td>%s</td>'
+                 '<td class="n">%s</td></tr>'
+                 % (escape(r.get("label") or ""), addr(r.get("node")),
+                    escape(", ".join(r.get("shared_with") or [])),
+                    money(r.get("combined_usd"))))
+        if r.get("note"):
+            h.append('<tr class="basis"><td></td><td class="note" colspan="2">%s</td></tr>'
+                     % escape(r["note"]))
+    h.append("</tbody></table>")
     return "".join(h)
 
 
@@ -1000,8 +1107,12 @@ def render_targeted(f, c, checks):
              '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td></tr></tfoot></table>'
              % (money(c["total_exposure"]), money(c["total_loss"]), pct(c["loss_pct"])))
 
-    # 2. defensive borrowing
+    # 2. who bears it (optional), then defensive borrowing
+    h.append(render_incidence(f, c))
     h.append(render_defensive(f, c))
+    n = 2 + bool((f.get("incidence") or {}).get("bearers")) \
+          + bool([p for p in (f.get("paths") or []) if p.get("defensive_borrowing")])
+    h.append(render_common_cause(f, c, n))
 
     # arithmetic check, kept as one line rather than a section
     drift = (abs(c["reconciled"] - c["assets"]) / c["assets"] * 100) if c["assets"] else 0
