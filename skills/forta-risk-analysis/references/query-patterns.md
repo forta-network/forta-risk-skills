@@ -20,9 +20,11 @@ would read the whole partition, and two shapes that look bounded do exactly that
 
 **How many ids per call.** A plain lookup (one row per id, as in Safe governance) takes up to 50 ids,
 the same cap as the `signer_overlap_for_safes` template. A traversal from the ids takes about 10:
-not because the server refuses more, but because one `LIMIT` is shared by every id in the call, so a
-wide batch fills the limit from the first few ids and the rest silently return nothing. If a
-traversal's row count reaches its `LIMIT`, split the batch and run it again.
+not because the server refuses more, but because one `LIMIT` is shared by every id in the call. The
+limit keeps the top rows by the sort key across all the ids together, so in a wide batch the rows it
+drops are the lower-ranked ones of every id, silently. If a traversal's row count reaches its
+`LIMIT`, split the batch and run it again. A traversal that returns one row per id (the fan-out
+check below) is bounded by its `LIMIT` in ids instead.
 
 When the listed nodes are then traversed, put `WITH n` between the id lookup and the traversal, as
 every multi-id query below does. Without it the planner folds the two `MATCH` clauses into one and
@@ -455,20 +457,25 @@ expression in the same block; take it from there. Either way the error being pre
 the raw borrower id, which splits one owner across its sub-accounts and under-reports its share:
 
 The whole protocol in one call, so an owner whose sub-accounts borrow from different vaults stays one
-row. It anchors on the indexed `lending_protocol` key and keeps only the vaults: Euler's debt tokens
-carry the same `lending_protocol` but are typed `variable_debt_token`, and would only add dead ids.
+row. It anchors on the indexed `lending_protocol` key. Euler's debt-token nodes carry the same key and
+simply contribute no rows, so no type filter is needed; one would drop a vault whose type has not been
+settled yet.
 
 ```cypher
 MATCH (m:Entity {graph_id:'risk-graph-rt-v3', lending_protocol:'euler_v2'})
-WHERE m.subcategory = 'lending_market'
 WITH m
 MATCH (m)<-[r:LENDING_BORROW]-(b:Entity {graph_id:'risk-graph-rt-v3'})
-WHERE coalesce(toFloat(r.debt_usd), 0) > 0
+WHERE r.protocol = 'euler_v2' AND coalesce(toFloat(r.debt_usd), 0) > 0
 RETURN substring(b.id,0,40) AS ownerPrefix,
-       count(*) AS subAccounts, count(DISTINCT m) AS vaults,
+       count(DISTINCT b) AS subAccounts, count(DISTINCT m) AS vaults,
        round(sum(toFloat(r.debt_usd))) AS debtUsd
 ORDER BY debtUsd DESC LIMIT 30
 ```
+
+Positions in a vault with no price carry a null `debt_usd` and drop out of this ranking, so every
+share it produces is a lower bound. Count them before quoting one: `count(r)` against
+`count(r.debt_usd)` over the same match.
+
 
 ---
 
@@ -508,8 +515,8 @@ ORDER BY inboundAdmins DESC LIMIT 30
 More than about 50 inbound admins across 4 or more subcategories is a role registry, not a
 control set. Record the degree, mark the branch unresolved, and do not expand it.
 
-Keep `$frontier` to about 10 ids per call (see *How many ids per call* above); it handles that with 90 result rows
-comfortably. Beyond that, split.
+It returns one row per frontier id, so keep `$frontier` within its `LIMIT 30`; beyond that,
+split.
 
 ---
 
