@@ -35,7 +35,11 @@ REL = re.compile(r"\[\s*`?(\w*)`?\s*(?::\s*([\w|]+))?\s*(\*[\d.]*)?\s*(\{[^}]*\}
 # An id compared with a literal or a parameter (either side), or tested against a list.
 # A join between two variables (m.id = y) is not a filter and is not flagged.
 ID_FILTER = re.compile(
-    r"(?<![\w).])[A-Za-z]\w*\.id\s*(?:=\s*(?:''|\$)|IN\s*[\[$])|(?:''|\$\w+)\s*=\s*[A-Za-z]\w*\.id\b", re.I)
+    r"(?<![\w).])[A-Za-z]\w*\.id\s*(?:=~|=\s*(?:''|\$|\w+\s*\()|IN\s*[\[$])"
+    r"|(?:''|\$\w+)\s*=\s*[A-Za-z]\w*\.id\b", re.I)
+# X.id = y / X.id IN y against a variable: a filter when y is an UNWIND value or a
+# WITH-bound list, unless X is the far end of a hop from a bound node (then it is a join).
+ID_VAR = re.compile(r"(?<![\w).])([A-Za-z]\w*)\.id\s*(?:=|IN)\s*([A-Za-z]\w*)\b(?!\s*[.(])", re.I)
 TRAVERSES = re.compile(r"\)\s*<?-")
 UNWIND_AS = re.compile(r"\bAS\s+(\w+)", re.I)
 WORD = re.compile(r"\b\w+\b")
@@ -70,9 +74,28 @@ def types(t):
 
 
 def keyed(table, rtypes, ks):
-    """Whether any key in ks is indexed on any of the edge types."""
+    """Whether any key in ks is indexed on any of the edge types (the conservative side,
+    for rebind warnings). An untyped hop may be any type."""
     pools = table.values() if rtypes is None else [table.get(t, ()) for t in rtypes]
     return any(k in pool for pool in pools for k in ks)
+
+
+def anchors(table, rtypes, ks):
+    """Whether ks reaches an index on EVERY edge type of the hop. An untyped hop, or an
+    alternation with an unindexed arm, cannot seek on the key."""
+    return bool(rtypes) and all(any(k in table.get(t, ()) for k in ks) for t in rtypes)
+
+
+def coalesce_spans(text):
+    """(start, end) of every coalesce(...) call, parentheses balanced."""
+    spans = []
+    for m in re.finditer(r"\bcoalesce\s*\(", text, re.I):
+        depth, i = 1, m.end()
+        while i < len(text) and depth:
+            depth += {"(": 1, ")": -1}.get(text[i], 0)
+            i += 1
+        spans.append((m.start(), i))
+    return spans
 
 
 def split_patterns(body):
@@ -95,7 +118,7 @@ def check(q):
     # keyword or '//' inside one must not split a clause or start a comment.
     q = re.sub(r"'[^']*'|\"[^\"]*\"", "''", q)
     q = re.sub(r"//[^\n]*|/\*.*?\*/", "", q, flags=re.S)
-    errs, bound, unwound, relvars = [], set(), set(), set()
+    errs, bound, unwound, relvars, far = [], set(), set(), set(), set()
     parts = CLAUSE.split(q)
     clauses = [(re.sub(r"\s+", " ", parts[i].upper()), parts[i + 1]) for i in range(1, len(parts) - 1, 2)]
     unwind_lookup = False  # the previous clause was an UNWIND-fed id lookup with no traversal
@@ -103,14 +126,18 @@ def check(q):
     for kw, body in clauses:
         if kw == "WHERE":
             for v, rt in hop_rels.items():
-                for m in re.finditer(r"(?<!\()\b%s\.(\w+)\b" % re.escape(v), body):
+                wrapped = coalesce_spans(body)
+                for m in re.finditer(r"\b%s\.(\w+)\b" % re.escape(v), body):
+                    if any(a <= m.start() < b for a, b in wrapped):
+                        continue
                     if keyed(EDGE_INDEXED, rt, [m.group(1)]):
                         errs.append("edge-index-rebind: %s.%s is edge-indexed and this hop starts from a "
                                     "bound node; wrap it in coalesce(%s.%s, ...) so the planner cannot "
                                     "rebind" % (v, m.group(1), v, m.group(1)))
             if relvars and re.search(r"\b(%s)\.graph_id\b" % "|".join(map(re.escape, relvars)), body):
                 errs.append("rel-graph-id: never filter a relationship on graph_id")
-            if ID_FILTER.search(body):
+            if ID_FILTER.search(body) or any(
+                    x not in far and y in unwound for x, y in ID_VAR.findall(body)):
                 errs.append("id-in-where: put the id in the node pattern, or UNWIND a list into it")
             continue
         hop_rels = {}
@@ -119,6 +146,7 @@ def check(q):
             continue
         if kw == "WITH":
             aliases = set(UNWIND_AS.findall(body))
+            unwound |= {a for a in aliases if re.search(r"\[[^\]]*\]\s+AS\s+%s\b" % a, body, re.I)}
             bound = (bound & set(WORD.findall(body.split(" WHERE ")[0]))) | aliases
             unwind_lookup = False
             continue
@@ -136,10 +164,10 @@ def check(q):
                 if "graph_id" in keys(props):
                     errs.append("rel-graph-id: never bind graph_id on a relationship")
             relvars.update(v for v, _, _ in rels if v)
-            seeks = [":Entity" in label.replace(" ", "") and any(k in NODE_KEYS for k in keys(props))
+            seeks = ["Entity" in re.split(r"\s*:\s*", label) and any(k in NODE_KEYS for k in keys(props))
                      for _, label, props in nodes]
-            uses_bound = [var in bound and not props for var, _, props in nodes]
-            rel_seek = any(keyed(EDGE_KEYS, rt, keys(props)) for _, rt, props in rels)
+            uses_bound = [bool(var) and var in bound for var, _, _ in nodes]
+            rel_seek = any(anchors(EDGE_KEYS, rt, keys(props)) for _, rt, props in rels)
             if nodes and not (any(seeks) or any(uses_bound) or rel_seek):
                 errs.append("graph-only: %s %s anchors on graph_id alone"
                             % (kw, (pat.strip().splitlines() or [""])[0]))
@@ -152,12 +180,15 @@ def check(q):
                                 "from a bound node lets the planner rebind it; filter in WHERE through "
                                 "coalesce(...) instead")
                 hop_rels.update({v: rt for v, rt, _ in rels if v})
+                far.update(var for (var, _, _), b in zip(nodes, uses_bound) if var and not b)
             fed = any(re.search(r"\bid\s*:\s*%s\b" % re.escape(u), props or "")
                       for _, _, props in nodes for u in unwound)
             if traverses and (fed or unwind_lookup):
                 errs.append("folded: put WITH <node> between the UNWIND-fed id lookup and the traversal")
             fed_any |= fed
             trav_any |= traverses
+            if fed_any and trav_any and not (fed and traverses):
+                errs.append("folded: put WITH <node> between the UNWIND-fed id lookup and the traversal")
             if any(seeks) or any(uses_bound) or rel_seek:
                 bound.update(var for var, _, _ in nodes if var)
         unwind_lookup = fed_any and not trav_any
@@ -219,6 +250,18 @@ SELF_TEST = [
      "MATCH (n)-[r:HOLDS]->(m:Entity {graph_id:'g'}) WHERE m.id = y RETURN m", None),
     ("MATCH (t:Entity {id:'x',graph_id:'g'}) WITH t "
      "MATCH (t)<-[r:LENDING_BORROW]-(b:Entity {graph_id:'g'}) WHERE r.protocol = 'aave_v3' RETURN b", None),
+    # follow-up review round
+    ("UNWIND $x AS y MATCH (n:Entity {id:y, graph_id:'g'}), (n)-[:OWNS]->(m:Entity {graph_id:'g'}) RETURN m", "folded"),
+    ("UNWIND ['0x1','0x2'] AS y MATCH (m:Entity {graph_id:'g', subcategory:'token'}) WHERE m.id = y RETURN m", "id-in-where"),
+    ("WITH ['0x1'] AS ids MATCH (n:Entity {graph_id:'g', subcategory:'token'}) WHERE n.id IN ids RETURN n", "id-in-where"),
+    ("MATCH (n:Entity {graph_id:'g', subcategory:'token'}) WHERE n.id = toLower($a) RETURN n", "id-in-where"),
+    ("MATCH (n:Entity {graph_id:'g', subcategory:'token'}) WHERE n.id =~ '0x12.*' RETURN n", "id-in-where"),
+    ("MATCH (a:Entity {graph_id:'g'})-[r {market_id:'x'}]->(b:Entity {graph_id:'g'}) RETURN b", "graph-only"),
+    ("MATCH (a:Entity {graph_id:'g'})-[r:LENDING_BORROW|HOLDS {market_id:'x'}]->(b:Entity {graph_id:'g'}) RETURN b", "graph-only"),
+    ("MATCH (n:EntityX {id:'x', graph_id:'g'}) RETURN n", "graph-only"),
+    ("MATCH (t:Entity {id:'x',graph_id:'g'}) WITH t MATCH (t)<-[r:HOLDS]-(u:Entity {graph_id:'g'}) "
+     "WHERE toFloat(r.usd_value) > 0 RETURN u", "edge-index-rebind"),
+    ("MATCH (n:Entity {id:'x',graph_id:'g'}) OPTIONAL MATCH (n:Entity {graph_id:'g'})-[r:HOLDS]->(m:Entity {graph_id:'g'}) RETURN m", None),
 ]
 
 
