@@ -30,7 +30,7 @@ All three share the rules in the next two sections. Read them before writing a q
 **The partition is versioned and it moves.** Confirm it in one call rather than assuming, because a wrong value is rejected with a message that names the correct one:
 
 ```cypher
-MATCH (n {graph_id:'discover'}) RETURN count(n)
+MATCH (n:Entity {id:'native', graph_id:'discover'}) RETURN count(n)
 ```
 
 ```
@@ -162,7 +162,7 @@ loss under a rush = debt already drawn + extra borrowing
 Do not call `resolve_address` on a high-degree node; `nodeLimit` does not bound edges and the payload can exceed 150k characters. Project instead:
 
 ```cypher
-MATCH (n {id:'<entity>', graph_id:'risk-graph-rt-v3'})
+MATCH (n:Entity {id:'<entity>', graph_id:'risk-graph-rt-v3'})
 RETURN n.id AS id, coalesce(n.label,n.name) AS label, n.symbol AS symbol,
        n.category AS cat, n.subcategory AS sub, n.project AS project,
        n.usd_price AS price, n.total_supply_raw AS supply, n.is_proxy AS isProxy
@@ -195,7 +195,7 @@ Note the gap between total assets and value actually deployed downstream. Idle c
 Probe the vocabulary first. One cheap query gives you the entity's whole structural shape:
 
 ```cypher
-MATCH (n {id:'<entity>', graph_id:'risk-graph-rt-v3'})-[r]->(m {graph_id:'risk-graph-rt-v3'})
+MATCH (n:Entity {id:'<entity>', graph_id:'risk-graph-rt-v3'})-[r]->(m:Entity {graph_id:'risk-graph-rt-v3'})
 RETURN type(r) AS rel, r.subcategory AS sub, m.category AS cat,
        m.subcategory AS mcat, count(*) AS c
 ORDER BY c DESC LIMIT 60
@@ -396,8 +396,8 @@ A protocol has no NAV to split, so mode A's frame produces a report about the wr
 ### B1. Fix the denominator
 
 ```cypher
-MATCH (n {graph_id:'risk-graph-rt-v3', subcategory:'lending_market'})
-WHERE n.lending_protocol = $proto AND n.total_supplied_usd IS NOT NULL
+MATCH (n:Entity {graph_id:'risk-graph-rt-v3', lending_protocol:$proto})
+WHERE n.subcategory = 'lending_market' AND n.total_supplied_usd IS NOT NULL
 RETURN count(*) AS mkts, round(sum(toFloat(n.total_supplied_usd))) AS supplied,
        round(sum(toFloat(coalesce(n.total_borrowed_usd,0)))) AS borrowed
 ```
@@ -407,7 +407,7 @@ Scope on `lending_protocol`. Then set the expansion floor: everything above it g
 ### B2. Separate internal from external
 
 ```cypher
-MATCH (n {graph_id:'risk-graph-rt-v3', project:$brand})
+MATCH (n:Entity {graph_id:'risk-graph-rt-v3', project:$brand})
 WHERE n.subcategory IN ['contract','admin','vault','protocol']
 RETURN n.id, coalesce(n.primary_label,n.label,n.blockscout_name,n.nametag) AS label,
        n.subcategory, n.is_proxy, n.at_risk_admin_at_stake_usd, n.max_key_value_usd
@@ -421,8 +421,10 @@ Here `project` **is** the right field, because the question is branding rather t
 Breadth-first up `ADMIN_CTRL` from every market, asset, oracle and internal contract above the floor. Use a bounded variable-length path rather than hand-rolling frontiers:
 
 ```cypher
-MATCH p = (root {graph_id:'risk-graph-rt-v3'})<-[:ADMIN_CTRL*1..4]-(ctrl {graph_id:'risk-graph-rt-v3'})
-WHERE root.id IN $roots
+UNWIND $roots AS rootId
+MATCH (root:Entity {id:rootId, graph_id:'risk-graph-rt-v3'})
+WITH root
+MATCH p = (root)<-[:ADMIN_CTRL*1..4]-(ctrl:Entity {graph_id:'risk-graph-rt-v3'})
 RETURN length(p) AS hops, [n IN nodes(p) | n.id] AS path,
        ctrl.subcategory AS sub, coalesce(ctrl.primary_label,ctrl.label,ctrl.blockscout_name) AS lbl,
        coalesce(ctrl.safe_threshold, ctrl.multisig_threshold) AS thr, ctrl.is_contract AS isC
@@ -446,8 +448,10 @@ Depth 4 is normal and 5 not unusual: markets to governor to an unlabelled `DEFAU
 **Check inbound admin degree before expanding any node.** Some contracts are role *registries*, and the graph attaches every role holder across a whole protocol family to them. Expanding one injects dozens of unrelated parties into the closure as though they controlled the asset.
 
 ```cypher
-MATCH (a {graph_id:'risk-graph-rt-v3'})-[:ADMIN_CTRL]->(b {graph_id:'risk-graph-rt-v3'})
-WHERE b.id IN $frontier
+UNWIND $frontier AS bId
+MATCH (b:Entity {id:bId, graph_id:'risk-graph-rt-v3'})
+WITH b
+MATCH (b)<-[:ADMIN_CTRL]-(a:Entity {graph_id:'risk-graph-rt-v3'})
 RETURN b.id, count(DISTINCT a.id) AS inboundAdmins,
        count(DISTINCT a.subcategory) AS distinctSubcats, collect(DISTINCT a.subcategory) AS subcats
 ORDER BY inboundAdmins DESC
@@ -460,7 +464,7 @@ ORDER BY inboundAdmins DESC
 For every reserve or collateral asset above the floor, the asset **is** a subgraph. Pull its roles two ways, because they differ in coverage:
 
 ```cypher
-MATCH (n {graph_id:'risk-graph-rt-v3', id:$asset})
+MATCH (n:Entity {graph_id:'risk-graph-rt-v3', id:$asset})
 RETURN n.admin_roles AS rolesJson, n.max_key_value_usd AS maxKey,
        n.is_proxy, n.proxy_type, n.owner_discovery_status, n.role_member_discovery_status
 ```
@@ -479,7 +483,8 @@ RETURN n.admin_roles AS rolesJson, n.max_key_value_usd AS maxKey,
 An empty set means two opposite things, and the node tells you which:
 
 ```cypher
-MATCH (n {graph_id:'risk-graph-rt-v3'}) WHERE n.id IN $ids
+UNWIND $ids AS nId
+MATCH (n:Entity {id:nId, graph_id:'risk-graph-rt-v3'})
 RETURN n.id, n.admin_roles, n.is_contract, n.is_proxy,
        n.owner_discovery_status, n.role_member_discovery_status,
        n.safe_probe_status, n.safe_probe_not_safe_reason
@@ -570,7 +575,7 @@ Three traps in that table specifically:
 **Denominator first, and it is where this goes wrong most expensively.** Resolve as in A1, then look at holder composition before dividing by anything:
 
 ```cypher
-MATCH (n {id:'<subject>', graph_id:'risk-graph-rt-v3'})-[r:HOLDS]->(m {graph_id:'risk-graph-rt-v3'})
+MATCH (n:Entity {id:'<subject>', graph_id:'risk-graph-rt-v3'})-[r:HOLDS]->(m:Entity {graph_id:'risk-graph-rt-v3'})
 WHERE r.usd_value IS NOT NULL
 RETURN m.id AS id, coalesce(m.primary_label,m.label,m.name,m.blockscout_name) AS label,
        m.subcategory AS sub, m.project AS proj, round(toFloat(r.usd_value)) AS usd
@@ -625,8 +630,10 @@ Without this, transitive closure eats the graph: an asset that is a fraction of 
 **Expand inward from the target**, one query per (frontier, edge type). **Do not use a variable-length pattern** (`*1..6`): the cost guard refuses it, and you lose the per-hop fractions you need for sizing.
 
 ```cypher
-MATCH (a {graph_id:'risk-graph-rt-v3'})-[r:VAULT_ALLOCATION]->(b {graph_id:'risk-graph-rt-v3'})
-WHERE a.id IN ['<frontier ids>']
+UNWIND ['<frontier ids>'] AS aId
+MATCH (a:Entity {id:aId, graph_id:'risk-graph-rt-v3'})
+WITH a
+MATCH (a)-[r:VAULT_ALLOCATION]->(b:Entity {graph_id:'risk-graph-rt-v3'})
 RETURN a.id AS src, b.id AS dst, r.allocated_usd AS usd, r.share_pct AS frac,
        r.adapter_address AS adapter, b.category AS cat, b.subcategory AS sub,
        coalesce(b.primary_label, b.label, b.name, b.blockscout_name) AS label
@@ -637,7 +644,7 @@ ORDER BY usd DESC LIMIT 200
 - **Carry the running product.** Each frontier entry is `(node, path so far, cumulative fraction, position value at the top)`. Never prune on depth.
 - **Prune on the TARGET's floor:** 0.5% of the target's NAV or $10,000, whichever is smaller. State it.
 - **Project `primary_label`.** On whole clusters of intermediaries `label`, `name` and `blockscout_name` are null or generic while `primary_label` carries the real attribution. An unnamed intermediary is a path the reader cannot check.
-- Batch frontier ids in groups of about 10; wider `IN` lists trip the guard.
+- Batch frontier ids in groups of about 10; wider lists trip the guard.
 
 **Then expand outward from the subject 2 to 3 hops and intersect.** A node in the intersection is a confirmed junction, and meeting in the middle is what lets you reach 7 or 8 hops total without either side exceeding the guard.
 

@@ -13,6 +13,11 @@ jobs:
       - name: Structural lint
         run: ./scripts/validate-skills.sh
 
+      # read_cypher refuses a plan that reads the whole partition. An example
+      # that trips it teaches every reader a query that cannot run.
+      - name: Cypher anchors
+        run: python3 scripts/lint-cypher-anchors.py
+
       # Skills ship against production. A non-production hostname in skills/ is
       # always a bug: it indexes a different partition, so the figures are not
       # comparable and nothing warns.

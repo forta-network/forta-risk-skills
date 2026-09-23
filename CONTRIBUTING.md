@@ -22,6 +22,7 @@ claude mcp add --transport http risk-graph https://risk-graph-mcp.forta.network/
 
 ```bash
 ./scripts/validate-skills.sh
+python3 scripts/lint-cypher-anchors.py
 ```
 
 That is structure only — frontmatter, naming, JSON manifests. It cannot tell
