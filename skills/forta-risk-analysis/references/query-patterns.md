@@ -18,6 +18,12 @@ would read the whole partition, and two shapes that look bounded do exactly that
   `UNWIND [...] AS x MATCH (n:Entity {id:x, graph_id:'…'})` instead: the same rows, one index seek
   per id. It is also one call where the list form invites one call per id.
 
+**How many ids per call.** A plain lookup (one row per id, as in Safe governance) takes up to 50 ids,
+the same cap as the `signer_overlap_for_safes` template. A traversal from the ids takes about 10:
+not because the server refuses more, but because one `LIMIT` is shared by every id in the call, so a
+wide batch fills the limit from the first few ids and the rest silently return nothing. If a
+traversal's row count reaches its `LIMIT`, split the batch and run it again.
+
 When the listed nodes are then traversed, put `WITH n` between the id lookup and the traversal, as
 every multi-id query below does. Without it the planner folds the two `MATCH` clauses into one and
 starts from the far side or from the whole edge type, so the query is refused although the ids are
@@ -168,7 +174,7 @@ RETURN n.id AS id,
        n.blockscout_name AS bsName, n.proxy_type AS proxyType, n.subcategory AS sub
 ```
 
-Pass every Safe in one call; the list feeds one index seek per id.
+Pass up to 50 Safes in one call; the list feeds one index seek per id.
 
 `owner_labels` is a JSON **string**, so parse it. A threshold of 1 with a single owner and
 `safe_probe_status = 'ok'` is a confirmed single private key: say so in those words.
@@ -448,19 +454,19 @@ the response, not exposed to the query engine. For that case the server publishe
 expression in the same block; take it from there. Either way the error being prevented is ranking on
 the raw borrower id, which splits one owner across its sub-accounts and under-reports its share:
 
-Pass every Euler vault the owner question covers in one call. The grouping runs across all of them,
-so an owner whose sub-accounts borrow from different vaults is still one row; one call per vault
-would split it again. Take the vault ids from the nodes carrying `lending_protocol:'euler_v2'`
-(an indexed lookup) rather than widening the anchor to the whole protocol.
+The whole protocol in one call, so an owner whose sub-accounts borrow from different vaults stays one
+row. It anchors on the indexed `lending_protocol` key and keeps only the vaults: Euler's debt tokens
+carry the same `lending_protocol` but are typed `variable_debt_token`, and would only add dead ids.
 
 ```cypher
-UNWIND ['<euler vault1>','<euler vault2>'] AS vaultId
-MATCH (m:Entity {id:vaultId, graph_id:'risk-graph-rt-v3'})
+MATCH (m:Entity {graph_id:'risk-graph-rt-v3', lending_protocol:'euler_v2'})
+WHERE m.subcategory = 'lending_market'
 WITH m
 MATCH (m)<-[r:LENDING_BORROW]-(b:Entity {graph_id:'risk-graph-rt-v3'})
-WHERE r.debt_usd IS NOT NULL AND r.protocol = 'euler_v2'
+WHERE coalesce(toFloat(r.debt_usd), 0) > 0
 RETURN substring(b.id,0,40) AS ownerPrefix,
-       count(*) AS subAccounts, round(sum(toFloat(r.debt_usd))) AS debtUsd
+       count(*) AS subAccounts, count(DISTINCT m) AS vaults,
+       round(sum(toFloat(r.debt_usd))) AS debtUsd
 ORDER BY debtUsd DESC LIMIT 30
 ```
 
@@ -502,7 +508,7 @@ ORDER BY inboundAdmins DESC LIMIT 30
 More than about 50 inbound admins across 4 or more subcategories is a role registry, not a
 control set. Record the degree, mark the branch unresolved, and do not expand it.
 
-The `UNWIND $frontier` pattern handles roughly 10 ids with 90 result rows
+Keep `$frontier` to about 10 ids per call (see *How many ids per call* above); it handles that with 90 result rows
 comfortably. Beyond that, split.
 
 ---

@@ -431,7 +431,7 @@ RETURN length(p) AS hops, [n IN nodes(p) | n.id] AS path,
 ORDER BY hops LIMIT 70
 ```
 
-Note the arrow: `<-[:ADMIN_CTRL]-` walks **up** the control chain. Two or three roots per call stays inside the guard. Depth 4 is safe; 5 starts timing out on dense roots. Filter a known hub out with `NOT $hub IN [n IN nodes(p) | n.id]`. Keep a visited set: the graph has cycles, since a token can be an admin of its own supply-control contract.
+Note the arrow: `<-[:ADMIN_CTRL]-` walks **up** the control chain. Two or three roots per call: a variable-length walk fans out fast, and one `LIMIT` is shared by every root, so a wide batch truncates silently. Depth 4 is safe; 5 starts timing out on dense roots. Filter a known hub out with `NOT $hub IN [n IN nodes(p) | n.id]`. Keep a visited set: the graph has cycles, since a token can be an admin of its own supply-control contract.
 
 **Terminate a branch on one of three conditions and record which:**
 
@@ -644,7 +644,7 @@ ORDER BY usd DESC LIMIT 200
 - **Carry the running product.** Each frontier entry is `(node, path so far, cumulative fraction, position value at the top)`. Never prune on depth.
 - **Prune on the TARGET's floor:** 0.5% of the target's NAV or $10,000, whichever is smaller. State it.
 - **Project `primary_label`.** On whole clusters of intermediaries `label`, `name` and `blockscout_name` are null or generic while `primary_label` carries the real attribution. An unnamed intermediary is a path the reader cannot check.
-- Batch frontier ids in groups of about 10; wider lists trip the guard.
+- Batch frontier ids in groups of about 10. The server accepts more, but one `LIMIT` is shared by the whole batch, so a wide one truncates silently; if the row count reaches the limit, split and rerun.
 
 **Then expand outward from the subject 2 to 3 hops and intersect.** A node in the intersection is a confirmed junction, and meeting in the middle is what lets you reach 7 or 8 hops total without either side exceeding the guard.
 
