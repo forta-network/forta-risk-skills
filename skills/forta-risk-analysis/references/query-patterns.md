@@ -365,11 +365,15 @@ UNWIND ['<collateral tokens>'] AS tId
 MATCH (t:Entity {id:tId, graph_id:'risk-graph-rt-v3'})
 WITH t
 MATCH (t)<-[r:HOLDS]-(u:Entity {graph_id:'risk-graph-rt-v3'})
-WHERE r.usd_value IS NOT NULL AND r.usd_value > 0
+WHERE coalesce(toFloat(r.usd_value), 0) > 0
 RETURN t.symbol AS collateral, u.id AS backing,
        coalesce(u.label,u.name) AS label, u.symbol AS bsym, r.usd_value AS usd
 ORDER BY usd DESC LIMIT 40
 ```
+
+The `coalesce` is load-bearing: `usd_value` is indexed on `HOLDS`, and a bare `r.usd_value > 0` after
+`WITH t` lets the planner answer the hop from that index instead of from `t`, which rebinds `t` and
+is refused. Wrapping the property keeps the filter off the index.
 
 The dominant row by USD is the backing; the tail is stray tokens transferred into the contract.
 `native HOLDS WETH` and `stETH HOLDS wstETH` both resolve this way. Known ids: native ETH is
@@ -408,9 +412,16 @@ sets, invisible if you stop at the wrapper.
 <a name="borrowers"></a>
 ## Borrowers
 
-Anchor on the node the borrow edge points at. On Aave-family protocols and Morpho Blue that is the
-reserve (loan) **token**, the same address the edge carries as `reserve_id`, never a market id; on
-Euler it is the vault. Filtering on `r.protocol` or `r.reserve_id` alone reads every borrow edge in
+Anchor on the node the borrow edge points at, which depends on the protocol:
+
+- **Aave v3 and its forks, Morpho Blue:** the reserve (loan) **token**, the same address the edge
+  carries as `reserve_id`, never a market id.
+- **Euler v2:** the vault.
+- **Aave v4, Compound v3, Maker:** the market node (the v4 reserve market, the Comet, the ilk market),
+  whose id the Aave v4 and Compound v3 edges also carry as `market`. Anchoring on the token here
+  returns zero rows.
+
+Filtering on `r.protocol` or `r.reserve_id` alone reads every borrow edge in
 the partition, which the plan check refuses.
 
 ```cypher
