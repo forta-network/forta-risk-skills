@@ -451,7 +451,7 @@ Depth 4 is normal and 5 not unusual: markets to governor to an unlabelled `DEFAU
 UNWIND $frontier AS bId
 MATCH (b:Entity {id:bId, graph_id:'risk-graph-rt-v3'})
 WITH b
-MATCH (a:Entity {graph_id:'risk-graph-rt-v3'})-[:ADMIN_CTRL]->(b)
+MATCH (b)<-[:ADMIN_CTRL]-(a:Entity {graph_id:'risk-graph-rt-v3'})
 RETURN b.id, count(DISTINCT a.id) AS inboundAdmins,
        count(DISTINCT a.subcategory) AS distinctSubcats, collect(DISTINCT a.subcategory) AS subcats
 ORDER BY inboundAdmins DESC

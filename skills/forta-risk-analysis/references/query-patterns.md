@@ -191,12 +191,10 @@ RETURN count(DISTINCT o.id) AS owners, collect(DISTINCT o.id) AS ownerIds
 ```
 
 One owner can sit behind more than one `OWNS` edge, because different writers record the same
-ownership separately, so `count(r)` overstates the signer set: on one 1-of-6 Safe it read 8. The
-duplicates are a known defect being collapsed; until that lands, `DISTINCT` on the owner id is the
-correct count, and it stays correct afterwards.
+ownership separately, so `count(r)` overstates the signer set. The duplicates are a known defect being collapsed; until
+that lands, `DISTINCT` on the owner id is the correct count, and it stays correct afterwards.
 
-Where the
-governance keys are absent from the node entirely, confirm with:
+Where the governance keys are absent from the node entirely, confirm with:
 
 ```cypher
 MATCH (n:Entity {id:'<safe>', graph_id:'risk-graph-rt-v3'})
@@ -366,7 +364,7 @@ If `token_address` equals `src`, then `dst` holds `src`. So **backing is inbound
 UNWIND ['<collateral tokens>'] AS tId
 MATCH (t:Entity {id:tId, graph_id:'risk-graph-rt-v3'})
 WITH t
-MATCH (u:Entity {graph_id:'risk-graph-rt-v3'})-[r:HOLDS]->(t)
+MATCH (t)<-[r:HOLDS]-(u:Entity {graph_id:'risk-graph-rt-v3'})
 WHERE r.usd_value IS NOT NULL AND r.usd_value > 0
 RETURN t.symbol AS collateral, u.id AS backing,
        coalesce(u.label,u.name) AS label, u.symbol AS bsym, r.usd_value AS usd
@@ -439,10 +437,16 @@ the response, not exposed to the query engine. For that case the server publishe
 expression in the same block; take it from there. Either way the error being prevented is ranking on
 the raw borrower id, which splits one owner across its sub-accounts and under-reports its share:
 
-One vault per call; repeat per vault rather than widening the anchor to the whole protocol.
+Pass every Euler vault the owner question covers in one call. The grouping runs across all of them,
+so an owner whose sub-accounts borrow from different vaults is still one row; one call per vault
+would split it again. Take the vault ids from the nodes carrying `lending_protocol:'euler_v2'`
+(an indexed lookup) rather than widening the anchor to the whole protocol.
 
 ```cypher
-MATCH (m:Entity {id:'<euler vault>', graph_id:'risk-graph-rt-v3'})<-[r:LENDING_BORROW]-(b:Entity {graph_id:'risk-graph-rt-v3'})
+UNWIND ['<euler vault1>','<euler vault2>'] AS vaultId
+MATCH (m:Entity {id:vaultId, graph_id:'risk-graph-rt-v3'})
+WITH m
+MATCH (m)<-[r:LENDING_BORROW]-(b:Entity {graph_id:'risk-graph-rt-v3'})
 WHERE r.debt_usd IS NOT NULL AND r.protocol = 'euler_v2'
 RETURN substring(b.id,0,40) AS ownerPrefix,
        count(*) AS subAccounts, round(sum(toFloat(r.debt_usd))) AS debtUsd
@@ -477,7 +481,7 @@ known hub with `NOT $hub IN [n IN nodes(p) | n.id]`.
 UNWIND $frontier AS bId
 MATCH (b:Entity {id:bId, graph_id:'risk-graph-rt-v3'})
 WITH b
-MATCH (a:Entity {graph_id:'risk-graph-rt-v3'})-[:ADMIN_CTRL]->(b)
+MATCH (b)<-[:ADMIN_CTRL]-(a:Entity {graph_id:'risk-graph-rt-v3'})
 RETURN b.id, count(DISTINCT a.id) AS inboundAdmins,
        count(DISTINCT a.subcategory) AS distinctSubcats,
        collect(DISTINCT a.subcategory) AS subcats
@@ -518,7 +522,7 @@ independent actually are:
 UNWIND ['<id1>','<id2>','<id3>'] AS nId
 MATCH (n:Entity {id:nId, graph_id:'risk-graph-rt-v3'})
 WITH n
-MATCH (f:Entity {graph_id:'risk-graph-rt-v3'})-[r:ADMIN_CTRL]->(n)
+MATCH (n)<-[r:ADMIN_CTRL]-(f:Entity {graph_id:'risk-graph-rt-v3'})
 RETURN f.id AS shared, coalesce(f.primary_label,f.label,f.nametag,'unlabelled') AS label,
        f.subcategory AS sub, count(DISTINCT n.id) AS hitCount,
        collect(DISTINCT r.role) AS roles
@@ -630,7 +634,7 @@ reaches the oracles and not the collateral. Walk the layers yourself.
 // hop 2 collateral: INCOMING to the market
 MATCH (v:Entity {graph_id:'risk-graph-rt-v3', id:'<vault>'})-[a:VAULT_ALLOCATION]->(m:Entity {graph_id:'risk-graph-rt-v3'})
 WHERE a.allocated_usd > 1
-MATCH (c:Entity {graph_id:'risk-graph-rt-v3'})-[:LENDING_COLLATERAL]->(m)
+MATCH (m)<-[:LENDING_COLLATERAL]-(c:Entity {graph_id:'risk-graph-rt-v3'})
 WITH DISTINCT c, sum(a.allocated_usd) AS exposure
 // hop 3: everything that collateral depends on, grouped by type and direction
 MATCH (c)-[r]-(x:Entity {graph_id:'risk-graph-rt-v3'})
