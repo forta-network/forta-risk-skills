@@ -1,42 +1,26 @@
-# Query patterns for `risk-graph-rt-v3`
+# Query patterns
 
-Tested Cypher for the Forta Risk Graph connector. Every **node** pattern binds
-`graph_id:'risk-graph-rt-v3'`; no **relationship** pattern does, and none should — many edges carry
-no partition stamp, so binding it there hides real edges and the empty result reads as an absence
-(server instructions, rule 1). Confirm the partition id and the node-id conventions from the server
-rather than from this line.
+Tested Cypher for the Forta Risk Graph connector. Prefer the typed tool named in each section; use these where no tool answers the question.
 
-**Every node pattern carries the `:Entity` label, and every query anchors on a selective key** — a
-node id written into the pattern, several ids fed through `UNWIND`, or an indexed property such as
-`lending_protocol`. `read_cypher` checks the plan before it runs anything and refuses a query that
-would read the whole partition, and two shapes that look bounded do exactly that:
+## How every query here is shaped
 
-- **An unlabelled pattern** — `(n {id:'…', graph_id:'…'})` — cannot use an index, so it plans a
-  scan of every node however specific its properties are.
-- **A list in `WHERE`** — `MATCH (n:Entity {graph_id:'…'}) WHERE n.id IN [...]` — seeks the
-  partition on `graph_id` alone and filters afterwards. Write
-  `UNWIND [...] AS x MATCH (n:Entity {id:x, graph_id:'…'})` instead: the same rows, one index seek
-  per id. It is also one call where the list form invites one call per id.
-
-**How many ids per call.** A plain lookup (one row per id, as in Safe governance) takes up to 50 ids,
-the same cap as the `signer_overlap_for_safes` template. A traversal from the ids takes about 10:
-not because the server refuses more, but because one `LIMIT` is shared by every id in the call. The
-limit keeps the top rows by the sort key across all the ids together, so in a wide batch the rows it
-drops are the lower-ranked ones of every id, silently. If a traversal's row count reaches its
-`LIMIT`, split the batch and run it again. A traversal that returns one row per id (the fan-out
-check below) is bounded by its `LIMIT` in ids instead.
-
-When the listed nodes are then traversed, put `WITH n` between the id lookup and the traversal, as
-every multi-id query below does. Without it the planner folds the two `MATCH` clauses into one and
-starts from the far side or from the whole edge type, so the query is refused although the ids are
-there.
+- **No `graph_id` anywhere.** The server injects its partition onto every node pattern you leave unanchored and rejects a different one, so writing it only hard-codes a partition id that changes. Never put it on a relationship: many edges carry no stamp, so the filter hides real edges and the empty result reads as an absence.
+- **Every node pattern carries `:Entity`, and every query anchors on a selective key**: a node id in the pattern, several ids fed through `UNWIND`, or an indexed property such as `lending_protocol`. `read_cypher` checks the plan first and refuses one that reads the whole partition, and two shapes that look bounded do exactly that: an unlabelled pattern (`(n {id:'...'})`), which cannot use an index, and a list in `WHERE` (`WHERE n.id IN [...]`), which filters after the scan. Write `UNWIND [...] AS x MATCH (n:Entity {id:x})` instead: the same rows, one index seek per id, one call.
+- **Put `WITH n` between an id lookup and the traversal from it**, as every multi-id query below does. Without it the planner folds the two into one clause, starts from the far side, and the query is refused although the ids are there.
+- **Ids per call.** A plain lookup (one row per id) takes up to 50 ids. A traversal from the ids takes about 10, because one `LIMIT` is shared by every id: the rows it drops are the lower-ranked ones of every id, silently. If a traversal's row count reaches its `LIMIT`, split the batch and run it again.
+- **Directed and single-typed.** Undirected or multi-type matches on high-degree nodes time out, and an undirected match also mixes a node's dependencies with its dependents.
+- **`LIMIT` on everything, aggregates included, and above the row count you expect.** It is capped at 1000, and a higher value is rejected rather than clamped. A result that fills its `LIMIT` exactly is reported as truncated, even a one-row aggregate, so `LIMIT 1` on an aggregate reads as a lower bound.
+- **Single-argument `round()` only**; `round(x, 2)` fails. So does a multi-branch `CASE` combined with wide aggregation.
+- **Relationship types are checked before the query runs.** A name the vocabulary does not carry (`UPGRADE_CTRL` has never existed; `DEPENDS_ON` is a category) is rejected with the list of live types. The same check misreads a list or pattern comprehension containing a `:` (`[(n)<-[:DVN_VERIFIES]-(d) | d.id]`, `[x IN l WHERE x:Entity | x.id]`) and rejects it as an unknown type, although the type exists: write it as a `MATCH` or `OPTIONAL MATCH` with `collect` or `count`.
+- **Project explicit fields.** A relationship dump on a high-degree node runs past 100k characters and consumes the context in one call. Never call bare `keys()` on a `lending_market` node, which carries 200+ properties; filter the list (`[k IN keys(m) WHERE k CONTAINS 'cap']`) or project named fields.
+- **On a timeout, narrow the query** rather than retrying it unchanged. Two independent frontier queries in one message run in parallel and the guard tolerates it.
 
 ## Contents
 
 - [Orientation](#orientation)
 - [Value deployment](#deployment)
 - [Wallets and Safes](#wallets)
-- [Dependencies](#dependencies)
+- [Dependencies and roles](#dependencies)
 - [Oracles](#oracles)
 - [Backing and nested collateral](#backing)
 - [Borrowers](#borrowers)
@@ -45,7 +29,6 @@ there.
 - [Confirming a concept exists](#probing)
 - [Per-borrower LTV and health (morpho_blue)](#borrowerltv)
 - [Recursing outward from a vault (A3 depth)](#recurse)
-- [Cross-checking against Morpho (A8)](#crosscheck)
 - [Defensive borrowing inputs](#defensive)
 
 ---
@@ -53,39 +36,34 @@ there.
 <a name="orientation"></a>
 ## Orientation
 
-**Resolve a node.** Project explicitly rather than calling `resolve_address` on anything
-high-degree, where the payload can exceed 150k characters.
+**Resolve a node.** Project explicitly rather than calling `resolve_address` on anything high-degree:
 
 ```cypher
-MATCH (n:Entity {id:'<entity>', graph_id:'risk-graph-rt-v3'})
+MATCH (n:Entity {id:'<entity>'})
 RETURN n.id AS id, coalesce(n.primary_label,n.label,n.name) AS label, n.symbol AS symbol,
        n.category AS cat, n.subcategory AS sub, n.project AS project,
-       n.lending_protocol AS proto, n.usd_price AS price,
-       n.total_supply_raw AS supply, n.is_proxy AS isProxy
+       n.lending_protocol AS proto, n.vault_kind AS vaultKind, n.usd_price AS price,
+       n.total_supply_raw AS supply, n.decimals AS dec, n.is_proxy AS isProxy, n.proxy_type AS proxyType
 ```
 
-**Map the structural vocabulary.** Run this first on anything new, once per direction. It is
-cheap and tells you which relationship types exist before you pull rows.
+**Which relationship types exist.** `available_traversals({nodeId})` gives exact counts and `absentTypes`. The Cypher equivalent, once per direction, where you also want the far side's subcategory:
 
 ```cypher
-MATCH (n:Entity {id:'<entity>', graph_id:'risk-graph-rt-v3'})-[r]->(m:Entity {graph_id:'risk-graph-rt-v3'})
-RETURN type(r) AS rel, r.subcategory AS sub, m.category AS cat,
-       m.subcategory AS mcat, count(*) AS c
+MATCH (n:Entity {id:'<entity>'})-[r]->(m:Entity)
+RETURN type(r) AS rel, m.subcategory AS mcat, count(*) AS c
 ORDER BY c DESC LIMIT 60
 ```
 
-**Inspect edge attributes** when you need to know what an edge carries:
+**What an edge carries today.** Properties are added to edges as the graph develops, and `keys()` is the only check that shows them:
 
 ```cypher
-MATCH (n:Entity {id:'<entity>', graph_id:'risk-graph-rt-v3'})-[r:ORACLE_DEP]->(m:Entity {graph_id:'risk-graph-rt-v3'})
+MATCH (n:Entity {id:'<entity>'})-[r:ORACLE_DEP]->(m:Entity)
 RETURN m.id AS other, keys(r) AS edgeAttrs LIMIT 25
 ```
 
-Edges whose `keys()` differ from their siblings carry extra meaning. Investigate rather than
-assuming uniformity.
+Edges whose `keys()` differ from their siblings carry extra meaning; investigate rather than assuming uniformity.
 
-**Find a node from a ticker.** Use the resolver, not Cypher: no index covers `symbol` or `name`,
-so a Cypher lookup on either reads the whole partition and the plan check refuses it.
+**A ticker to a node.** Use the resolver, not Cypher: no index covers `symbol` or `name`, so a Cypher lookup on either reads the whole partition and the plan check refuses it.
 
 ```
 resolve_entities({query: "WBTC", subcategories: ["token"]})
@@ -98,77 +76,88 @@ Expect decoys: confirm the candidate against the canonical address before anchor
 <a name="deployment"></a>
 ## Value deployment
 
-**Vault allocations into markets:**
+**Vault NAV:** `get_denominator({nodeId})` first. The allocations themselves:
 
 ```cypher
-MATCH (v:Entity {id:'<vault>', graph_id:'risk-graph-rt-v3'})-[r]->(t:Entity {graph_id:'risk-graph-rt-v3'})
-WHERE r.subcategory = 'VAULT_ALLOCATION'
-RETURN t.id AS target, coalesce(t.label,t.name) AS label, t.subcategory AS sub,
-       r.allocated_usd AS usd, r.share_pct AS pct, r.adapter_address AS adapter,
-       r.adapter_type AS adapterType, t.collateral_asset AS collat,
-       t.loan_asset AS loan, t.lltv AS lltv
+MATCH (v:Entity {id:'<vault>'})-[r:VAULT_ALLOCATION]->(t:Entity)
+RETURN t.id AS target, coalesce(t.primary_label,t.label,t.name) AS label, t.subcategory AS sub,
+       r.allocated_usd AS usd, r.share_pct AS pct, r.market_key AS marketKey,
+       r.adapter_address AS adapter, r.adapter_type AS adapterType,
+       t.collateral_asset AS collat, t.loan_asset AS loan, t.lltv AS lltv
 ORDER BY usd DESC LIMIT 50
 ```
 
-Direction matters: edges **out** of the vault are its allocations, edges **in** are other
-entities allocating into it. Undirected matching mixes them, and the inbound rows are easy to
-mistake for tiny allocations of your own.
+Edges out of the vault are its allocations; edges into it are other entities allocating into it. Two checks on the result: `allocated_usd / share_pct` should be identical on every row (that value is total assets, with the A1 caveats on what agreement proves), and a `sum(share_pct)` below 1.0 is idle or unitemised deployment.
 
-Two checks on the result:
-
-- `allocated_usd / share_pct` must be **identical on every row**. That value is the vault's
-  total assets, and agreement is the strongest available confirmation of the denominator.
-- `sum(share_pct)` below 1.0 means idle capital. Carry it as its own position, exposed to the
-  vault contract and denomination asset but not to the markets.
-
-**Adapters, aggregated.** For a Morpho Vault V2 one adapter can route everything:
+**Adapters, aggregated.** On a Morpho Vault V2 one adapter can route everything:
 
 ```cypher
-MATCH (v:Entity {id:'<vault>', graph_id:'risk-graph-rt-v3'})-[r]->(t:Entity {graph_id:'risk-graph-rt-v3'})
-WHERE r.subcategory = 'VAULT_ALLOCATION'
-RETURN DISTINCT r.adapter_address AS adapter, r.adapter_type AS type,
+MATCH (v:Entity {id:'<vault>'})-[r:VAULT_ALLOCATION]->(t:Entity)
+RETURN r.adapter_address AS adapter, r.adapter_type AS type,
        count(*) AS markets, sum(toFloat(r.allocated_usd)) AS usd
 ORDER BY usd DESC LIMIT 20
 ```
 
-The summed `usd` is also a clean cross-check on the NAV denominator.
-
-**Protocol-level supply.** Scope on `lending_protocol`:
+**Redemption capacity of a Morpho Vault V2**, two tiers (Mode A, A2). The instant, penalty-free tier is on the node. Absent is not zero, and it is not additive across vaults that designate the same market:
 
 ```cypher
-MATCH (n:Entity {graph_id:'risk-graph-rt-v3', lending_protocol:'<protocol>'})
-WHERE n.subcategory = 'lending_market' AND n.total_supplied_usd IS NOT NULL
-RETURN count(*) AS mkts, round(sum(toFloat(n.total_supplied_usd))) AS supplied,
-       round(sum(toFloat(coalesce(n.total_borrowed_usd,0)))) AS borrowed
+MATCH (v:Entity {id:'<vault>'})
+RETURN v.instant_liquidity_usd AS instantLiquidityUsd, v.instant_liquidity_basis AS basis,
+       v.liquidity_market_key AS designatedMarket, v.liquidity_adapter_address AS liquidityAdapter,
+       v.instant_liquidity_updated_at AS updatedAt, v.vault_kind AS vaultKind
 ```
+
+The force-deallocatable tier (any holder, at the adapter's penalty) is not stored. This cross-check sums min(allocation, market liquidity) over the funded markets other than the designated one; the protocol's `forceDeallocatableLiquidity` is the figure to report (`protocol-crosschecks.md`):
+
+```cypher
+MATCH (v:Entity {id:'<vault>'})-[r:VAULT_ALLOCATION]->(m:Entity)
+WHERE coalesce(m.market_key, '') <> coalesce(v.liquidity_market_key, '-')
+  AND coalesce(toFloat(r.allocated_usd), 0) > 0
+RETURN count(m) AS markets, count(m.available_liquidity_usd) AS marketsWithLiquidity,
+       round(sum(CASE WHEN toFloat(r.allocated_usd) < toFloat(m.available_liquidity_usd)
+                      THEN toFloat(r.allocated_usd) ELSE toFloat(m.available_liquidity_usd) END)) AS forceDeallocatableUsd
+LIMIT 5
+```
+
+A market with no liquidity figure drops out of the sum, so `marketsWithLiquidity` below `markets` makes it a lower bound.
+
+**Protocol-level supply.** Scope on `lending_protocol` and group by subcategory: on the Aave family the per-reserve stats sit on nodes typed `atoken`, so a `lending_market`-only filter misses nearly all of the protocol.
+
+```cypher
+MATCH (n:Entity {lending_protocol:'<protocol>'})
+WHERE n.total_supplied_usd IS NOT NULL
+RETURN n.subcategory AS sub, count(n) AS nodes,
+       round(sum(toFloat(n.total_supplied_usd))) AS supplied,
+       round(sum(toFloat(coalesce(n.total_borrowed_usd,0)))) AS borrowed
+ORDER BY supplied DESC LIMIT 20
+```
+
+State which population the total covers; `get_schema`'s `total_supplied_usd` caveat explains why no such sum is custody.
 
 ---
 
 <a name="wallets"></a>
 ## Wallets and Safes
 
-**Everything a wallet holds.** A wallet is the **target** of `HOLDS`; the token is the source.
+**Everything a wallet holds.** A wallet is the target of `HOLDS`; the token is the source.
 
 ```cypher
-MATCH (w:Entity {id:'<wallet>', graph_id:'risk-graph-rt-v3'})<-[r:HOLDS]-(t:Entity {graph_id:'risk-graph-rt-v3'})
+MATCH (w:Entity {id:'<wallet>'})<-[r:HOLDS]-(t:Entity)
 WHERE r.usd_value IS NOT NULL
-RETURN t.id AS token, coalesce(t.label,t.name) AS label, t.symbol AS sym,
+RETURN t.id AS token, coalesce(t.primary_label,t.label,t.name) AS label, t.symbol AS sym,
        t.usd_price AS price, t.project AS project,
        r.usd_value AS usd, r.quantity_raw AS qty, r.updated_block AS blk,
        r.token_address AS tokenAddr, startNode(r).id AS startId
 ORDER BY usd DESC LIMIT 50
 ```
 
-`tokenAddr` and `startId` must both equal `token`. If they equal the wallet, the direction is
-backwards and you are reading peer holdings. The share balance is `quantity_raw`;
-`balance_raw` does not exist and returns null. The `usd_value` filter is load-bearing, since
-null-valued scam-token rows sort to the top under `ORDER BY usd DESC`.
+`tokenAddr` and `startId` must both equal `token` (native ETH carries no `token_address`); if they equal the wallet, the direction is backwards and you are reading peer holdings. The balance is `quantity_raw` (`balance_raw` does not exist and returns null). The `usd_value` filter is load-bearing: unpriced rows sort first under `ORDER BY ... DESC`.
 
-**Safe governance. Run this on every multisig you reach, including the subject itself:**
+**Who controls a Safe:** `get_governance({nodeId})` first. For several at once, one index seek per id, up to 50 per call:
 
 ```cypher
 UNWIND ['<safe1>','<safe2>'] AS safeId
-MATCH (n:Entity {id:safeId, graph_id:'risk-graph-rt-v3'})
+MATCH (n:Entity {id:safeId})
 RETURN n.id AS id,
        coalesce(n.safe_threshold, n.multisig_threshold) AS threshold,
        n.owner_labels AS ownerLabels, n.timelock_delay_seconds AS timelock,
@@ -176,295 +165,242 @@ RETURN n.id AS id,
        n.blockscout_name AS bsName, n.proxy_type AS proxyType, n.subcategory AS sub
 ```
 
-Pass up to 50 Safes in one call; the list feeds one index seek per id.
+`owner_labels` is a JSON string, so parse it. A threshold of 1 with a single owner and `safe_probe_status = 'ok'` is a confirmed single private key: say so in those words. A stored threshold or timelock of 0 can be a failed read rather than a value; `get_governance` says which.
 
-`owner_labels` is a JSON **string**, so parse it. A threshold of 1 with a single owner and
-`safe_probe_status = 'ok'` is a confirmed single private key: say so in those words.
-
-**Signers shared across Safes.** Use the curated template: one call for up to 50 Safes, one row per
-signer that sits on more than one of them.
+**Signers shared across Safes:** the curated template, one call for up to 50 Safes, one row per signer sitting on more than one of them:
 
 ```
 read_cypher({template: "signer_overlap_for_safes", params: {safeIds: ["<safe1>", "<safe2>"]}})
 ```
 
-A Safe that appears in no row either shares no signer with the others or has no `OWNS` edges at
-all. Tell the two apart with the owner count below before calling a Safe independent.
+A Safe in no row either shares no signer with the others or has no `OWNS` edges at all. Tell the two apart with the owner count below before calling a Safe independent.
 
-**Owners of one Safe.** Count distinct owners, never edges:
+**Owners of one Safe.** Count distinct owners, never edges: different writers record the same ownership separately, so one owner can sit behind more than one `OWNS` edge.
 
 ```cypher
-MATCH (s:Entity {id:'<safe>', graph_id:'risk-graph-rt-v3'})-[:OWNS]->(o:Entity {graph_id:'risk-graph-rt-v3'})
+MATCH (s:Entity {id:'<safe>'})-[:OWNS]->(o:Entity)
 RETURN count(DISTINCT o.id) AS owners, collect(DISTINCT o.id) AS ownerIds
 ```
 
-One owner can sit behind more than one `OWNS` edge, because different writers record the same
-ownership separately, so `count(r)` overstates the signer set. The duplicates are a known defect being collapsed; until
-that lands, `DISTINCT` on the owner id is the correct count, and it stays correct afterwards.
-
-Where the governance keys are absent from the node entirely, confirm with:
+Where governance keys are absent from the node entirely:
 
 ```cypher
-MATCH (n:Entity {id:'<safe>', graph_id:'risk-graph-rt-v3'})
-RETURN [k IN keys(n) WHERE k CONTAINS 'sign' OR k CONTAINS 'thresh'
-        OR k CONTAINS 'owner'] AS govKeys,
+MATCH (n:Entity {id:'<safe>'})
+RETURN [k IN keys(n) WHERE k CONTAINS 'sign' OR k CONTAINS 'thresh' OR k CONTAINS 'owner'] AS govKeys,
        n.blockscout_name AS bsName, n.proxy_type AS proxyType,
        n.subcategory AS sub, n.is_verified AS verified
 ```
 
-A verified contract named `SafeProxy` with `proxy_type = 'master_copy'` is a Safe, and a Safe
-always has owners and a threshold. Read them from a Safe UI or on-chain when the Safe is
-material to the conclusion.
+A verified contract named `SafeProxy` with `proxy_type = 'master_copy'` is a Safe, and a Safe always has owners and a threshold. Read them from a Safe UI or on-chain when the Safe is material to the conclusion.
 
-**Residual approvals.** A real risk row on a wallet that appears nowhere else:
+**Residual approvals**, a real risk row on a wallet that appears nowhere else:
 
 ```cypher
-MATCH (w:Entity {id:'<wallet>', graph_id:'risk-graph-rt-v3'})-[r:APPROVES]->(sp:Entity {graph_id:'risk-graph-rt-v3'})
+MATCH (w:Entity {id:'<wallet>'})-[r:APPROVES]->(sp:Entity)
 RETURN sp.id AS spender, coalesce(sp.primary_label,sp.label,sp.blockscout_name) AS lbl,
        r.token_contract AS token, r.is_unlimited AS unlimited,
        r.value AS rawValue, r.updated_block AS blk LIMIT 40
 ```
 
-Compare each allowance against the position it relates to. An allowance larger than its
-position is worth flagging even when `is_unlimited` is false.
+Compare each allowance against the position it relates to. An allowance larger than its position is worth flagging even when `is_unlimited` is false.
 
-**Look-through on a held vault.** Size the wallet's slice as `holding_usd x share_pct`; this
-never needs a share price. Use the allocations query above against the held vault.
+**Look-through on a held vault.** Size the wallet's slice as `holding_usd x share_pct`, using the allocations query above against the held vault; this never needs a share price.
 
-**Supply sanity, before trusting any derived share price:**
+**Supply sanity, before trusting any derived share price.** Both sides are raw units in the share token's decimals, so compare them directly:
 
 ```cypher
-MATCH (t:Entity {id:'<vault>', graph_id:'risk-graph-rt-v3'})-[r:HOLDS]->(h:Entity {graph_id:'risk-graph-rt-v3'})
+MATCH (t:Entity {id:'<vault>'})-[r:HOLDS]->(h:Entity)
 WHERE r.quantity_raw IS NOT NULL
-RETURN count(*) AS holders, sum(toFloat(r.quantity_raw))/1e18 AS sumShares
+RETURN count(*) AS holders, sum(toFloat(r.quantity_raw)) AS heldRaw,
+       toFloat(t.total_supply_raw) AS supplyRaw
+LIMIT 5
 ```
 
-If `sumShares` exceeds `total_supply_raw`, more shares are held than exist, so the supply
-figure is understated and any share price derived from it is inflated. Report the position at
-`HOLDS.usd_value` instead. Second invariant, also one query: `total_supply_raw x usd_price`
-must never be below `sum(allocated_usd)`, because a vault cannot lend out more than it owns.
+If `heldRaw` exceeds `supplyRaw`, more shares are held than exist, so the supply figure is understated and any share price derived from it is inflated: report the position at `HOLDS.usd_value` instead. The second invariant: `total_supply_raw x usd_price` must never be below `sum(allocated_usd)`.
 
 ---
 
 <a name="dependencies"></a>
-## Dependencies
+## Dependencies and roles
 
-**One hop out from a set of nodes.** Batch the source ids; the `src` column keeps the mapping
-straight and it is far cheaper than one call per node.
+**One hop out from a set of nodes.** Batch the source ids; the `src` column keeps the mapping straight:
 
 ```cypher
 UNWIND ['<id1>','<id2>'] AS nId
-MATCH (n:Entity {id:nId, graph_id:'risk-graph-rt-v3'})
+MATCH (n:Entity {id:nId})
 WITH n
-MATCH (n)-[r:LENDING_COLLATERAL]->(d:Entity {graph_id:'risk-graph-rt-v3'})
+MATCH (n)-[r:LENDING_COLLATERAL]->(d:Entity)
 RETURN n.id AS src, d.id AS dep, coalesce(d.primary_label,d.label,d.name) AS label,
-       d.subcategory AS sub, r.usage_as_collateral_enabled AS pledgeable,
+       d.subcategory AS sub, r.protocol AS protocol, r.usage_as_collateral_enabled AS pledgeable,
        r.total_collateral_usd AS collatUsd, r.ltv AS ltv,
        r.liquidation_threshold AS lt, r.liquidation_bonus AS bonus,
-       r.max_borrow_capacity_usd AS borrowCeiling
+       r.emode_categories AS emode, r.last_checked_block AS checkedBlk
 ORDER BY src LIMIT 80
 ```
 
-Repeat per relationship type: `ORACLE_DEP`, `ADMIN_OF`, `ADMIN_CTRL`, `CUSTODY_VIA`,
-`OWNS_ADMIN`, `CURATES`, `BACKED_BY`, `RESERVE_BACKING`, `BRIDGE_BACKED_BY`, `EXIT_VIA`, `RECEIPT_FOR`.
-**`DEPENDS_ON` and `UPGRADE_CTRL` do not exist** — a category and an unimplemented name. Both return
-zero rows silently, which reads as absence. One type per query keeps you inside the
-cost guard; a multi-type `WHERE type(r) IN [...]` against high-degree nodes times out.
+Repeat per relationship type, one directed type per query, taking the set from the census rather than a list. `read_cypher` rejects a name the vocabulary does not carry, but a tool's relationship-type filter (`get_node_relationships`) does not check it and returns zero rows silently, which reads as absence.
 
-**Admin and control edges for a token:**
+**The admin set of a token:** `get_admin_risk` and `get_governance` first. In Cypher, read `ADMIN_OF` outgoing from the token. `ADMIN_CTRL` and `ADMIN_OF` record the same fact in opposite directions, never add them, and `ADMIN_OF` is the leg to count on, because `ADMIN_CTRL` carries parallel duplicates:
 
 ```cypher
-MATCH (a:Entity {graph_id:'risk-graph-rt-v3'})-[r:ADMIN_CTRL]->(t:Entity {id:'<token>', graph_id:'risk-graph-rt-v3'})
-RETURN DISTINCT a.id AS admin, coalesce(a.primary_label,a.label,a.nametag) AS label,
-       a.subcategory AS sub, r.role AS role, a.is_contract AS isContract,
-       coalesce(a.safe_threshold,a.multisig_threshold) AS threshold,
+MATCH (t:Entity {id:'<token>'})-[r:ADMIN_OF]->(a:Entity)
+RETURN a.id AS admin, coalesce(a.primary_label,a.label,a.nametag) AS label,
+       a.subcategory AS sub, collect(DISTINCT coalesce(r.role_name, r.role)) AS roles,
+       a.is_contract AS isContract, coalesce(a.safe_threshold,a.multisig_threshold) AS threshold,
        a.max_key_value_usd AS keyValue
-ORDER BY role LIMIT 60
+ORDER BY keyValue DESC LIMIT 60
 ```
 
-`ADMIN_OF` mirrors `ADMIN_CTRL` with the same `role`, so one directed query on one type returns
-the full set. Deduplicate by address for counting, and check any finding against how the
-contract actually works.
-
-**Roles from node properties**, which sometimes carry more than the edges:
+**Roles from node properties**, which sometimes carry more than the edges, with the discovery status that classifies an empty set (Mode B, B6):
 
 ```cypher
-MATCH (n:Entity {id:'<asset>', graph_id:'risk-graph-rt-v3'})
-RETURN n.admin_roles AS rolesJson, n.max_key_value_usd AS maxKey,
-       n.at_risk_admin_at_stake_usd AS adminAtStake, n.is_proxy, n.proxy_type,
-       n.implementation, n.timelock_delay_seconds AS timelock,
-       n.owner_discovery_status AS ownerStatus,
-       n.role_member_discovery_status AS roleStatus
+UNWIND ['<id1>','<id2>'] AS nId
+MATCH (n:Entity {id:nId})
+RETURN n.id AS id, n.admin_roles AS rolesJson, n.max_key_value_usd AS maxKey,
+       n.at_risk_admin_at_stake_usd AS adminAtStake, n.is_contract AS isContract,
+       n.is_proxy AS isProxy, n.proxy_type AS proxyType, n.implementation AS impl,
+       n.owner_discovery_status AS ownerStatus, n.role_member_discovery_status AS roleStatus,
+       n.safe_probe_status AS probe, n.safe_probe_not_safe_reason AS probeReason
 ```
 
-`admin_roles` is a JSON **string** mapping address to a list of role names. Parse it and
-reconcile against the edge query, which carries the role on the relationship.
+`admin_roles` is a JSON string mapping address to a list of role names. Parse it and reconcile it against the edge query, which carries the role on the relationship. `is_proxy = false` is not evidence of immutability: read `proxy_type` and the role set.
 
 ---
 
 <a name="oracles"></a>
 ## Oracles
 
-**The market's price authority.** Filter on `value_defining = true`:
+**The price authority.** Two edge markers answer two different questions, so read both. `pricing_authority = true` marks the oracle that prices a venue's collateral: on a Morpho market it is the market's own oracle, and that edge carries `value_defining = false` on purpose. `value_defining = true` marks an oracle that determines a token's own price (token and aToken consumers). Filtering on `value_defining` alone returns nothing on a Morpho market. `get_schema` describes only `value_defining`; `pricing_authority` is newer, and `keys()` on the edge shows both.
 
 ```cypher
 UNWIND ['<market1>','<market2>'] AS mId
-MATCH (m:Entity {id:mId, graph_id:'risk-graph-rt-v3'})
+MATCH (m:Entity {id:mId})
 WITH m
-MATCH (m)-[r:ORACLE_DEP]->(o:Entity {graph_id:'risk-graph-rt-v3'})
-WHERE r.value_defining = true
+MATCH (m)-[r:ORACLE_DEP]->(o:Entity)
+WHERE r.pricing_authority = true OR r.value_defining = true
 RETURN m.id AS market, o.id AS oracle,
        coalesce(o.primary_label,o.label,o.nametag,'unlabelled') AS label,
-       r.market_id AS mktId, r.protocol AS protocol
+       r.pricing_authority AS pricingAuthority, r.value_defining AS valueDefining,
+       o.oracle_pair AS pair, r.market_id AS mktId, r.protocol AS protocol
 ORDER BY market LIMIT 40
 ```
 
-`market_id` is supporting evidence where present, never the filter: keying on it returns Morpho
-markets only and drops genuine price paths on other protocols. Read the marker's own coverage from
-`get_schema`'s `value_defining` entry rather than from a figure written here — it is thin, and thin
-enough that on many subjects you should expect few rows or none. On a **token** node the property
-does not exist at all; use `oracle_pricing_type` there (server instructions, rule 8). Every position
-the marker does not resolve keeps its oracle row, worded as candidates not confirmed to a single
-feed, with its dollar figure.
+`market_id` is supporting evidence where present, never the filter: keying on it returns Morpho markets only and drops genuine price paths elsewhere. Both markers are thin, so on many subjects expect few rows or none. Both are edge properties. How the oracle itself prices (`oracle_pricing_type`) is on the oracle node at the far end, beside its `oracle_pricing_classify_*` attempt markers: an attempt with no type means it was tried and not classified, which is unknown, not a finding. Every position no marker resolves keeps its oracle row, worded as candidates not confirmed to a single feed, with its dollar figure.
 
-**Upstream feeds behind a market oracle.** Match on label, since aggregator typing is
-unreliable:
+**The feeds behind a market oracle**, with their pairs:
 
 ```cypher
 UNWIND ['<oracle1>','<oracle2>'] AS oId
-MATCH (o:Entity {id:oId, graph_id:'risk-graph-rt-v3'})
+MATCH (o:Entity {id:oId})
 WITH o
-MATCH (o)-[r:ORACLE_DEP]->(f:Entity {graph_id:'risk-graph-rt-v3'})
-WHERE (coalesce(f.primary_label,f.label,f.nametag,'') CONTAINS 'Aggregator'
-       OR coalesce(f.primary_label,f.label,'') CONTAINS 'Feed')
+MATCH (o)-[r:ORACLE_DEP]->(f:Entity)
 RETURN o.id AS marketOracle, f.id AS feed,
-       coalesce(f.primary_label,f.label,f.nametag) AS feedLabel,
-       f.subcategory AS sub, r.value_defining AS vd
+       coalesce(f.primary_label,f.label,f.nametag) AS feedLabel, f.subcategory AS sub,
+       f.oracle_pair AS pair, f.oracle_pair_identified AS pairIdentified, r.value_defining AS vd
 ORDER BY marketOracle LIMIT 40
 ```
 
-Feed nodes carry no pair identification, so name a pair only where the address justifies it and
-label it as inferred. Report an unidentified feed by address with its impact figure rather than
-dropping it.
+`oracle_pair` is the feed's pair. `oracle_pair_identified: false` means no declarable pair, and absent means the feed was never consulted: a different claim. Never infer a pair from a feed's name. Report an unidentified feed by address with its impact figure rather than dropping it.
 
-**Oracle admins over the whole feed set** is sound even where per-market attribution is not:
-collect the feed addresses, then run the `ADMIN_CTRL` query above over that set and rank the
-admins by the value beneath them.
+**Oracle admins over the whole feed set** is sound even where per-market attribution is not: collect the feed addresses, run the admin-set query above over them, and rank the admins by the value beneath them.
 
 ---
 
 <a name="backing"></a>
 ## Backing and nested collateral
 
-`HOLDS` runs **token to holder**, and `r.token_address` always equals the source, which settles
-any doubt:
+`get_backing({nodeId})` first: it separates real collateral legs from proof-of-reserve attestations and reports every layer with its count. For the custody side, `HOLDS` runs token to holder, and `r.token_address` always equals the source, which settles any doubt:
 
 ```cypher
-MATCH (a:Entity {id:'<one side>', graph_id:'risk-graph-rt-v3'})-[r:HOLDS]->(b:Entity {id:'<other side>', graph_id:'risk-graph-rt-v3'})
+MATCH (a:Entity {id:'<one side>'})-[r:HOLDS]->(b:Entity {id:'<other side>'})
 RETURN a.id AS src, b.id AS dst, r.token_address AS tokenAddr, r.usd_value AS usd
 ```
 
-If `token_address` equals `src`, then `dst` holds `src`. So **backing is inbound** and
-**holders are outbound**.
+If `token_address` equals `src`, then `dst` holds `src`. So what backs a token is **inbound** and its holders are **outbound**.
 
 ```cypher
-// BACKING of a collateral token. The underlying is the source.
-UNWIND ['<collateral tokens>'] AS tId
-MATCH (t:Entity {id:tId, graph_id:'risk-graph-rt-v3'})
+// What a collateral token custodies: the underlying is the source.
+UNWIND ['<collateral token>'] AS tId
+MATCH (t:Entity {id:tId})
 WITH t
-MATCH (t)<-[r:HOLDS]-(u:Entity {graph_id:'risk-graph-rt-v3'})
+MATCH (t)<-[r:HOLDS]-(u:Entity)
 WHERE coalesce(toFloat(r.usd_value), 0) > 0
 RETURN t.symbol AS collateral, u.id AS backing,
        coalesce(u.label,u.name) AS label, u.symbol AS bsym, r.usd_value AS usd
 ORDER BY usd DESC LIMIT 40
 ```
 
-The `coalesce` is load-bearing: `usd_value` is indexed on `HOLDS`, and a bare `r.usd_value > 0` after
-`WITH t` lets the planner answer the hop from that index instead of from `t`, which rebinds `t` and
-is refused. Wrapping the property keeps the filter off the index.
+The `coalesce` is load-bearing: `usd_value` is indexed on `HOLDS`, and a bare `r.usd_value > 0` after `WITH t` lets the planner answer the hop from that index instead of from `t`, which rebinds `t` and is refused.
 
-The dominant row by USD is the backing; the tail is stray tokens transferred into the contract.
-`native HOLDS WETH` and `stETH HOLDS wstETH` both resolve this way. Known ids: native ETH is
-`native`, stETH is `0xae7ab96520de3a18e5e111b5eaab095312d7fe84`, eETH is
-`0x35fa164735182de50811e8e2e824cfb9b6118ac2`.
+The dominant row by USD is the backing; the tail is stray tokens transferred into the contract. `native HOLDS WETH` and `stETH HOLDS wstETH` both resolve this way. Known ids: native ETH is `native`, stETH is `0xae7ab96520de3a18e5e111b5eaab095312d7fe84`, eETH is `0x35fa164735182de50811e8e2e824cfb9b6118ac2`.
 
 ```cypher
-// HOLDERS of the entity: redemption-pressure concentration. Outbound.
-MATCH (t:Entity {id:'<entity>', graph_id:'risk-graph-rt-v3'})-[r:HOLDS]->(h:Entity {graph_id:'risk-graph-rt-v3'})
+// Holders of the entity: redemption-pressure concentration. Outbound.
+MATCH (t:Entity {id:'<entity>'})-[r:HOLDS]->(h:Entity)
 WHERE r.usd_value IS NOT NULL
-RETURN h.id AS holder, coalesce(h.label,h.symbol,h.blockscout_name) AS label,
+RETURN h.id AS holder, coalesce(h.primary_label,h.label,h.symbol,h.blockscout_name) AS label,
        h.subcategory AS sub, h.project AS proj, r.usd_value AS usd
 ORDER BY usd DESC LIMIT 30
 ```
 
-Reading this backwards does not merely lose data, it invents dependencies: it presents a peer
-depositor's admin keys as control over your collateral.
+Reading this backwards does not merely lose data; it invents dependencies, presenting a peer depositor's admin keys as control over your collateral.
 
 Two more backing types, run separately rather than as one multi-type match:
 
 ```cypher
-MATCH (a:Entity {graph_id:'risk-graph-rt-v3'})-[r:RESERVE_BACKING]->(b:Entity {id:'<token>', graph_id:'risk-graph-rt-v3'})
-RETURN a.id AS backing, coalesce(a.label,a.name) AS label, a.symbol AS sym,
-       startNode(r).id AS startId LIMIT 20
+MATCH (b:Entity {id:'<token>'})-[r:RESERVE_BACKING]->(a:Entity)
+RETURN a.id AS treasury, coalesce(a.label,a.name) AS label, a.symbol AS sym,
+       endNode(r).id = startNode(r).id AS selfLoop LIMIT 20
 ```
 
-Repeat with `:BRIDGE_BACKED_BY`. Both are sparse and carry the same scam-token population as
-`HOLDS`, so filter by hand. Custodial arrangements behind a wrapped asset sit off-chain: name
-the custodian for what it is rather than treating its absence from the graph as a result.
+Repeat with `:BRIDGE_BACKED_BY`, which lands on the lockbox or OFT adapter; the adapter's verifiers arrive on incoming `DVN_VERIFIES`. Both types are sparse and carry the same scam-token population as `HOLDS`, so filter by hand. Custodial arrangements behind a wrapped asset sit off-chain: name the custodian for what it is rather than treating its absence from the graph as a result.
 
-Then resume the dependency walk from whatever you land on. Nested tokens have their own admin
-sets, invisible if you stop at the wrapper.
+Then resume the dependency walk from whatever you land on. Nested tokens have their own admin sets, invisible if you stop at the wrapper.
 
 ---
 
 <a name="borrowers"></a>
 ## Borrowers
 
-Anchor on the node the borrow edge points at, which depends on the protocol:
+`get_concentration({nodeId: <market>, groupBy: "owner"})` first, and `get_levered_position({nodeId})` for one borrower. For raw rows, anchor on the node the borrow edge points at, which depends on the protocol (`get_schema`, `LENDING_BORROW`):
 
-- **Aave v3 and its forks, Morpho Blue:** the reserve (loan) **token**, the same address the edge
-  carries as `reserve_id`, never a market id.
+- **Aave v3 and its forks, Morpho Blue:** the reserve (loan) **token**, the same address the edge carries as `reserve_id`, never a market id. Morpho legs carry the market as `market_id`.
 - **Euler v2:** the vault.
-- **Aave v4, Compound v3, Maker:** the market node (the v4 reserve market, the Comet, the ilk market),
-  whose id the Aave v4 and Compound v3 edges also carry as `market`. Anchoring on the token here
-  returns zero rows.
+- **Aave v4, Compound v3, Maker:** the market node (the v4 reserve market, the Comet, the ilk market).
 
-Filtering on `r.protocol` or `r.reserve_id` alone reads every borrow edge in
-the partition, which the plan check refuses.
+Filtering on `r.protocol` or `r.reserve_id` alone reads every borrow edge in the partition, which the plan check refuses.
 
 ```cypher
-MATCH (t:Entity {id:'<reserve token address>', graph_id:'risk-graph-rt-v3'})<-[r:LENDING_BORROW]-(b:Entity {graph_id:'risk-graph-rt-v3'})
+MATCH (t:Entity {id:'<reserve token address>'})<-[r:LENDING_BORROW]-(b:Entity)
 WHERE r.debt_usd IS NOT NULL AND r.protocol = '<protocol>'
 RETURN b.id AS borrower, b.category AS cat, b.subcategory AS sub,
        round(toFloat(r.debt_usd)) AS debtUsd, r.last_stat_block AS blk
 ORDER BY debtUsd DESC LIMIT 30
 ```
 
-Zero rows means the wrong id shape or an uncovered protocol, not an absence of borrowers:
-confirm which before writing anything down.
+An empty result here is never on its own evidence of no borrowers. It usually means the wrong id shape or a protocol with no per-borrower writer: settle it with `available_traversals` on the anchor and the market's `total_borrowed_usd` before writing anything down. On morpho_blue, anchor one market exactly on the edge's `market_id` instead (Per-borrower LTV below): several markets can share a loan and collateral pair.
 
-**Prefer `get_concentration({nodeId, groupBy:"owner"})` over the aggregate below.** It groups on the
-server's own owner basis and refuses to publish a share or ranking over a population it could not
-page in full, which the query below will happily do. Use the query only where the tool refuses and
-you have narrowed the population enough that it pages completely.
-
-**On owner grouping, note which of two forms applies.** A query that returns borrower **rows** is
-stamped by the server with `canonical_owner_id` and `canonical_owner_id_basis` per row, plus a
-`canonicalBorrowerOwners` block on the response — read that stamp rather than deriving anything. A
-query that **aggregates inside Cypher**, like the one below, cannot see the stamp: it is served on
-the response, not exposed to the query engine. For that case the server publishes the equivalent
-expression in the same block; take it from there. Either way the error being prevented is ranking on
-the raw borrower id, which splits one owner across its sub-accounts and under-reports its share:
-
-The whole protocol in one call, so an owner whose sub-accounts borrow from different vaults stays one
-row. It anchors on the indexed `lending_protocol` key. Euler's debt-token nodes carry the same key and
-simply contribute no rows, so no type filter is needed; one would drop a vault whose type has not been
-settled yet.
+**Shared control among the top borrowers.** Owner grouping merges sub-accounts only, so two borrower contracts run by one controller rank as two owners. Read the admins of the top-ranked borrower contracts; a controller over two or more of them makes their debt one exposure:
 
 ```cypher
-MATCH (m:Entity {graph_id:'risk-graph-rt-v3', lending_protocol:'euler_v2'})
+UNWIND ['<borrower1>','<borrower2>','<borrower3>'] AS bId
+MATCH (b:Entity {id:bId})
+WITH b
+MATCH (b)-[r:ADMIN_OF]->(a:Entity)
+WITH a, collect(DISTINCT b.id) AS borrowers, collect(DISTINCT coalesce(r.role_name, r.role)) AS roles
+RETURN a.id AS controller, coalesce(a.primary_label,a.label,a.nametag,a.blockscout_name) AS label,
+       size(borrowers) AS nBorrowers, borrowers, roles
+ORDER BY nBorrowers DESC LIMIT 20
+```
+
+Report a shared controller's combined share as its own row, labelled inferred from shared control.
+
+**Owner grouping.** Rows a query returns are stamped by the server with `canonical_owner_id` and its basis, plus a `canonicalBorrowerOwners` block on the response: read the stamp rather than deriving anything. A query that aggregates inside Cypher cannot see the stamp, so group on the equivalent expression the server names in that block. The query below uses the 19-byte EVC owner prefix, which matches the server's `evc_subaccount_prefix_19_bytes` basis; if the server names a different expression, use that. Either way the error prevented is ranking on the raw borrower id, which splits one owner across its sub-accounts. The whole protocol in one call, so an owner whose sub-accounts borrow from different vaults stays one row:
+
+```cypher
+MATCH (m:Entity {lending_protocol:'euler_v2'})
 WITH m
-MATCH (m)<-[r:LENDING_BORROW]-(b:Entity {graph_id:'risk-graph-rt-v3'})
+MATCH (m)<-[r:LENDING_BORROW]-(b:Entity)
 WHERE r.protocol = 'euler_v2' AND coalesce(toFloat(r.debt_usd), 0) > 0
 RETURN substring(b.id,0,40) AS ownerPrefix,
        count(DISTINCT b) AS subAccounts, count(DISTINCT m) AS vaults,
@@ -472,304 +408,245 @@ RETURN substring(b.id,0,40) AS ownerPrefix,
 ORDER BY debtUsd DESC LIMIT 30
 ```
 
-Positions in a vault with no price carry a null `debt_usd` and drop out of this ranking, so every
-share it produces is a lower bound. Count them before quoting one: `count(r)` against
-`count(r.debt_usd)` over the same match.
-
+Positions with no price carry a null `debt_usd` and drop out of this ranking, so every share it produces is a lower bound. Count them before quoting one: `count(r)` against `count(r.debt_usd)` over the same match.
 
 ---
 
 <a name="closure"></a>
 ## Control closure
 
-**Bounded upward walk.** Walk `ADMIN_CTRL` against its canonical direction, which `get_schema` names:
+**The protocol's own contracts** (B2). `project` is the right field here only because the question is branding:
 
 ```cypher
-UNWIND $roots AS rootId
-MATCH (root:Entity {id:rootId, graph_id:'risk-graph-rt-v3'})
+MATCH (n:Entity {project:'<brand>'})
+WHERE n.subcategory IN ['contract','admin','vault','protocol']
+RETURN n.id AS id, coalesce(n.primary_label,n.label,n.blockscout_name,n.nametag) AS label,
+       n.subcategory AS sub, n.is_proxy AS isProxy,
+       n.at_risk_admin_at_stake_usd AS adminAtStake, n.max_key_value_usd AS maxKey
+LIMIT 60
+```
+
+**Bounded upward walk** (B3). Walk `ADMIN_CTRL` against its canonical direction. Parallel duplicate edges repeat paths, so deduplicate before the `LIMIT`:
+
+```cypher
+UNWIND ['<root1>','<root2>'] AS rootId
+MATCH (root:Entity {id:rootId})
 WITH root
-MATCH p = (root)<-[:ADMIN_CTRL*1..4]-(ctrl:Entity {graph_id:'risk-graph-rt-v3'})
-RETURN length(p) AS hops, [n IN nodes(p) | n.id] AS path,
-       ctrl.subcategory AS sub, coalesce(ctrl.primary_label,ctrl.label,ctrl.blockscout_name) AS lbl,
+MATCH p = (root)<-[:ADMIN_CTRL*1..4]-(ctrl:Entity)
+WITH DISTINCT root.id AS rootId, [n IN nodes(p) | n.id] AS path, length(p) AS hops, ctrl
+RETURN rootId, hops, path, ctrl.subcategory AS sub,
+       coalesce(ctrl.primary_label,ctrl.label,ctrl.blockscout_name) AS lbl,
        coalesce(ctrl.safe_threshold, ctrl.multisig_threshold) AS thr,
        ctrl.is_contract AS isC, ctrl.safe_probe_status AS probe
 ORDER BY hops LIMIT 70
 ```
 
-Two or three roots per call. Depth 4 is safe, 5 starts timing out on dense roots. Exclude a
-known hub with `NOT $hub IN [n IN nodes(p) | n.id]`.
+Two or three roots per call. Depth 4 is safe; 5 starts timing out on dense roots. Exclude a known hub with `WHERE NOT '<hub>' IN [n IN nodes(p) | n.id]` before the `WITH`.
 
-**Fan-out check, before expanding anything:**
+**Fan-out check, before expanding anything** (B4):
 
 ```cypher
-UNWIND $frontier AS bId
-MATCH (b:Entity {id:bId, graph_id:'risk-graph-rt-v3'})
+UNWIND ['<frontier1>','<frontier2>'] AS bId
+MATCH (b:Entity {id:bId})
 WITH b
-MATCH (b)<-[:ADMIN_CTRL]-(a:Entity {graph_id:'risk-graph-rt-v3'})
-RETURN b.id, count(DISTINCT a.id) AS inboundAdmins,
+MATCH (b)<-[:ADMIN_CTRL]-(a:Entity)
+RETURN b.id AS node, count(DISTINCT a.id) AS inboundAdmins,
        count(DISTINCT a.subcategory) AS distinctSubcats,
        collect(DISTINCT a.subcategory) AS subcats
 ORDER BY inboundAdmins DESC LIMIT 30
 ```
 
-More than about 50 inbound admins across 4 or more subcategories is a role registry, not a
-control set. Record the degree, mark the branch unresolved, and do not expand it.
-
-It returns one row per frontier id, so keep `$frontier` within its `LIMIT 30`; beyond that,
-split.
+More than about 50 inbound admins across 4 or more subcategories is a role registry, not a control set: record the degree, mark the branch unresolved, do not expand it. It returns one row per frontier id, so keep the frontier within its `LIMIT 30`.
 
 ---
 
 <a name="concentration"></a>
 ## Concentration and shared components
 
-**Supplier concentration** (who else supplies a market alongside the subject):
+**Supplier concentration**, who else supplies a market alongside the subject:
 
 ```cypher
-UNWIND ['<markets>'] AS mId
-MATCH (m:Entity {id:mId, graph_id:'risk-graph-rt-v3'})
+UNWIND ['<market1>'] AS mId
+MATCH (m:Entity {id:mId})
 WITH m
-MATCH (m)<-[r]-(s:Entity {graph_id:'risk-graph-rt-v3'})
-WHERE r.subcategory = 'VAULT_ALLOCATION'
+MATCH (m)<-[r:VAULT_ALLOCATION]-(s:Entity)
 RETURN m.id AS market, s.id AS supplier,
-       coalesce(s.label,s.symbol) AS label, r.allocated_usd AS usd
+       coalesce(s.primary_label,s.label,s.symbol) AS label, r.allocated_usd AS usd
 ORDER BY market, usd DESC LIMIT 120
 ```
 
-A high share is a two-way risk: hard to exit without moving the market, and majority absorption
-of any bad debt.
+A high share is a two-way risk: hard to exit without moving the market, and majority absorption of any bad debt. A market with exactly one non-zero supplier makes that supplier's loss the market's whole debt.
 
-**Shared components across several nodes.** Use this to test whether dependencies that look
-independent actually are:
+**Shared components across several nodes**, to test whether dependencies that look independent are:
 
 ```cypher
 UNWIND ['<id1>','<id2>','<id3>'] AS nId
-MATCH (n:Entity {id:nId, graph_id:'risk-graph-rt-v3'})
+MATCH (n:Entity {id:nId})
 WITH n
-MATCH (n)<-[r:ADMIN_CTRL]-(f:Entity {graph_id:'risk-graph-rt-v3'})
+MATCH (n)<-[r:ADMIN_CTRL]-(f:Entity)
 RETURN f.id AS shared, coalesce(f.primary_label,f.label,f.nametag,'unlabelled') AS label,
        f.subcategory AS sub, count(DISTINCT n.id) AS hitCount,
-       collect(DISTINCT r.role) AS roles
+       collect(DISTINCT coalesce(r.role_name, r.role)) AS roles
 ORDER BY hitCount DESC LIMIT 30
 ```
 
-Read the result carefully. A shared **upstream** component (an admin, an aggregator, a
-custodian) is internal correlation and is what you are looking for. A shared **downstream**
-consumer (another vault reading the same feed) is systemic contagion, a different finding.
-Distinguish the two explicitly.
+A shared upstream component (an admin, an aggregator, a custodian) is internal correlation, which is what you are looking for. A shared downstream consumer (another vault reading the same feed) is systemic contagion, a different finding. Distinguish the two explicitly.
 
 ---
 
 <a name="probing"></a>
 ## Confirming a concept exists
 
-Before describing something as outside the data, confirm it two ways: by node type and by
-relationship type. One probe alone is not enough, since the concept may exist under a name you
-did not guess.
+Before describing something as outside the data, confirm it two ways, by node type and by relationship type: the concept may exist under a name you did not guess.
 
 ```cypher
 UNWIND ['<guess1>','<guess2>'] AS guess
-MATCH (n:Entity {graph_id:'risk-graph-rt-v3', subcategory:guess})
+MATCH (n:Entity {subcategory:guess})
 RETURN guess AS sub, count(n) AS c ORDER BY c DESC LIMIT 20
 ```
 
-```cypher
-MATCH (m:Entity {id:'<node>', graph_id:'risk-graph-rt-v3'})-[r]->(n:Entity {graph_id:'risk-graph-rt-v3'})
-RETURN type(r) AS rel, count(*) AS c ORDER BY c DESC LIMIT 30
-```
-
-Relationship types available in this partition include `HOLDS`, `AT_RISK`, `ORACLE_DEP`,
-`LENDING_COLLATERAL`, `LENDING_BORROW`, `DEBT_FOR`, `ADMIN_CTRL`, `ADMIN_OF`,
-`CUSTODY_VIA`, `OWNS`, `OWNS_ADMIN`, `CURATES`, `VAULT_ASSET`,
-`VAULT_ALLOCATION`, `POOL_ASSET`, `RECEIPT_FOR`, `RESERVE_BACKING`, `BRIDGE_BACKED_BY`,
-`BACKED_BY`, `WRAP_UNWRAP`, `EXIT_VIA`, `AFFECTS`, `SERVICE_FOR`, `DEPLOYED_BY`, `APPROVES`.
-
-**Do not trust any prose list of types, including this one.** Get the live census, which gives exact
-counts and flags the deprecated and unpopulated types:
-
-```
-get_schema({includeCensus: true})
-```
-
-Read the counts from that call rather than from this file. Every partition-wide figure moves, and a
-stale count is worse than none: some types sit thin enough that an empty traversal over them proves
-nothing about the entity you queried, and only the census tells you which ones today. A type can
-also be thin and entirely correct where it exists, so thin is a reason to check the population, not
-a reason to skip the type.
-
-For one node rather than the partition, `available_traversals({nodeId})` gives present types with
-exact counts plus an **`absentTypes`** list, which is a measured absence rather than a guess.
+For relationship types, `get_schema({includeCensus: true})` gives exact partition-wide counts with sparse and deprecated flags, and `available_traversals({nodeId})` gives one node's present types plus a measured `absentTypes` list. Read the counts from those calls, never from a list written in a file: a type can be thin and entirely correct where it exists, so thin is a reason to check the population, not to skip the type.
 
 ---
 
 <a name="borrowerltv"></a>
 ## Per-borrower LTV and health (morpho_blue)
 
-`LENDING_BORROW` carries the borrower's own collateral on morpho_blue, so read the edge rather than
-inferring a basis with `get_levered_position`, which is built for protocols that issue a receipt or
-share token and reports `unresolved` where collateral is escrowed instead.
+For one borrower, `get_levered_position({nodeId})`: on morpho_blue its debt legs carry the protocol writer's per-position collateral, `positionLtv` and `healthFactor`, trust-filtered. For a whole market, read the borrow edges:
 
 ```cypher
-MATCH (b:Entity {graph_id:'risk-graph-rt-v3'})-[r:LENDING_BORROW {market_id:'<market_key>'}]->(t:Entity {graph_id:'risk-graph-rt-v3'})
+MATCH (b:Entity)-[r:LENDING_BORROW {market_id:'<market_key>'}]->(t:Entity)
 WHERE r.collateral_usd IS NOT NULL
 RETURN b.id AS borrower, r.collateral_token AS collToken, r.collateral_usd AS collUsd,
-       r.debt_usd AS debtUsd,
-       100.0*r.debt_usd/r.collateral_usd AS ltvPct,
-       toFloat(r.lltv)/1e16 AS lltvPct,
-       r.last_stat_block AS blk
+       r.debt_usd AS debtUsd, 100.0*r.debt_usd/r.collateral_usd AS ltvPct,
+       toFloat(r.lltv)/1e16 AS lltvPct, r.health_factor AS hf, r.last_stat_block AS blk
 ORDER BY r.debt_usd DESC LIMIT 20
 ```
 
-**Report the LTV and the LLTV, and let the gap between them speak.** The drawdown that reaches
-liquidation is `1 - ltvPct/lltvPct`, and it used to be a column of its own. It is not, because a
-third percentage derived from two already on the row asks the reader to work out which of the three
-is the input. Keep it for your own reading, and check it against the protocol's own
-`priceVariationToLiquidationPrice` in A8, but do not give it a column.
+Report the LTV and the LLTV and let the gap between them speak. The drawdown that reaches liquidation is `1 - ltvPct/lltvPct`: keep it for your own reading and check it against the protocol's `priceVariationToLiquidationPrice` in A8, but do not give it a column.
 
-**Verify `collateral_usd` before quoting it.** A degenerate collateral price produces a phantom
-shortfall that reads as insolvency:
+**Verify `collateral_usd` before quoting it.** A degenerate collateral price produces a phantom shortfall that reads as insolvency:
 
 ```cypher
-// implied unit price vs the collateral node's own usd_price
-MATCH (b:Entity {graph_id:'risk-graph-rt-v3'})-[r:LENDING_BORROW {market_id:'<market_key>'}]->(t:Entity {graph_id:'risk-graph-rt-v3'})
+// implied unit price vs the usd_price on the collateral node
+MATCH (b:Entity)-[r:LENDING_BORROW {market_id:'<market_key>'}]->(t:Entity)
 WHERE r.collateral_usd IS NOT NULL
 WITH r, toFloat(r.collateral_raw) AS craw
-MATCH (c:Entity {id:r.collateral_token, graph_id:'risk-graph-rt-v3'})
-RETURN c.symbol, c.usd_price AS nodePrice, c.decimals AS dec,
+MATCH (c:Entity {id:r.collateral_token})
+RETURN c.symbol AS sym, c.usd_price AS nodePrice, c.decimals AS dec,
        sum(r.collateral_usd) / (sum(craw) / 10.0^c.decimals) AS impliedPrice
 ```
 
-Within a few percent is clean. Orders of magnitude apart is fabricated: known degenerate assets are
-sDeUSD and deUSD (1e-8), USR ($0.122), RLP ($0.147).
-
-Also check `last_stat_block` spread across legs you compare. An LTV mixing legs refreshed days
-apart is not a health factor.
+Within a few percent is clean; orders of magnitude apart is a fabricated price. Also check the `last_stat_block` spread across legs you compare: an LTV mixing legs refreshed days apart is not a health factor.
 
 ---
 
 <a name="recurse"></a>
 ## Recursing outward from a vault (A3 depth)
 
-`dependency_closure` does **not** reach a vault's collateral: it walks `LENDING_COLLATERAL`
-in its canonical direction only, so from a vault or market anchor it
-reaches the oracles and not the collateral. Walk the layers yourself.
+`dependency_closure({nodeId: <vault>, maxHops: 4})` gives the candidate set, collateral and base asset included. For the layer table, walk each layer directed and one type at a time.
 
 ```cypher
-// hop 2 collateral: INCOMING to the market
-MATCH (v:Entity {graph_id:'risk-graph-rt-v3', id:'<vault>'})-[a:VAULT_ALLOCATION]->(m:Entity {graph_id:'risk-graph-rt-v3'})
+// hop 2: the collateral behind each funded market (incoming to the market)
+MATCH (v:Entity {id:'<vault>'})-[a:VAULT_ALLOCATION]->(m:Entity)
 WHERE a.allocated_usd > 1
-MATCH (m)<-[:LENDING_COLLATERAL]-(c:Entity {graph_id:'risk-graph-rt-v3'})
-WITH DISTINCT c, sum(a.allocated_usd) AS exposure
-// hop 3: everything that collateral depends on, grouped by type and direction
-MATCH (c)-[r]-(x:Entity {graph_id:'risk-graph-rt-v3'})
-WHERE type(r) IN ['ADMIN_CTRL','ADMIN_OF','BACKED_BY','RESERVE_BACKING','BRIDGE_BACKED_BY',
-                  'WRAP_UNWRAP','RECEIPT_FOR','HOLDS','ORACLE_DEP','EXIT_VIA','DEBT_FOR']
-RETURN c.symbol AS coll, c.id AS collId, exposure, type(r) AS rel,
-       startNode(r).id = c.id AS outbound, count(*) AS n,
-       collect(DISTINCT coalesce(x.symbol,x.primary_label,x.blockscout_name,x.id))[0..5] AS examples
-ORDER BY exposure DESC, n DESC LIMIT 60
+WITH m, sum(a.allocated_usd) AS exposure
+MATCH (m)<-[:LENDING_COLLATERAL]-(c:Entity)
+RETURN c.id AS collId, c.symbol AS coll, collect(m.id) AS markets, sum(exposure) AS exposure
+ORDER BY exposure DESC LIMIT 60
 ```
 
 ```cypher
-// hop 4: the feed behind the feed
-MATCH (v:Entity {graph_id:'risk-graph-rt-v3', id:'<vault>'})-[a:VAULT_ALLOCATION]->(m:Entity {graph_id:'risk-graph-rt-v3'})
-WHERE a.allocated_usd > 1
-MATCH (m)-[od:ORACLE_DEP]->(o:Entity {graph_id:'risk-graph-rt-v3'}) WHERE od.value_defining = true
-OPTIONAL MATCH (o)-[r2]-(x:Entity {graph_id:'risk-graph-rt-v3'})
-WHERE type(r2) IN ['ORACLE_DEP','ADMIN_CTRL','ADMIN_OF','SERVICE_FOR','DEPLOYED_BY']
-RETURN substring(m.id,14,10) AS mkt, a.allocated_usd AS alloc, o.id AS oracleId,
-       coalesce(o.primary_label,o.blockscout_name,o.id) AS oracleName, type(r2) AS rel,
-       startNode(r2).id = o.id AS outbound,
-       coalesce(x.primary_label,x.blockscout_name,x.symbol,x.id) AS other, x.id AS otherId
-ORDER BY alloc DESC LIMIT 400
+// hop 3: one dependency type at a time from the collateral set, in its upstream direction
+UNWIND ['<collateral1>','<collateral2>'] AS cId
+MATCH (c:Entity {id:cId})
+WITH c
+MATCH (c)-[r:BACKED_BY]->(x:Entity)
+RETURN c.symbol AS coll, x.id AS dep, coalesce(x.symbol,x.primary_label,x.blockscout_name) AS label,
+       r.source AS source
+LIMIT 60
 ```
 
-The second query returns a large payload on a multi-market vault — well past 100k characters — so
-parse it from a file rather than reading it into context. Then repeat the hop-3 pattern on each
-underlying until a branch yields nothing new. A typical chain runs six hops before it terminates:
-vault to market to a wrapped LST to its underlying to that underlying's backing contract. Walked
-that way it surfaces a collateral token
-controlled by a **single key** over 27.85% of NAV, a node named `DummyFeed` in a `value_defining`
-price path for 22.34%, and three of five collateral assets with **zero** `EXIT_VIA` venues.
+Rerun the hop-3 query per type, in the direction that reaches what the collateral depends on: outgoing `ADMIN_OF` (its admins), `BACKED_BY`, `RESERVE_BACKING`, `BRIDGE_BACKED_BY`, `WRAP_UNWRAP`, `RECEIPT_FOR`, `DEBT_FOR`, `ORACLE_DEP` and `EXIT_VIA`, and incoming `HOLDS` (what it custodies). The opposite directions are the collateral's dependents (its holders, the markets and adapters that consume its price, wrappers built on it) and do not belong in this layer.
 
-Use Mode B's B3 bounded `<-[:ADMIN_CTRL*1..4]-` walk and B4 fan-out guard for the control chain
-above any of those nodes.
+```cypher
+// hop 4: the feed behind the price-authority oracle of each market
+MATCH (v:Entity {id:'<vault>'})-[a:VAULT_ALLOCATION]->(m:Entity)
+WHERE a.allocated_usd > 1
+WITH m, a
+MATCH (m)-[od:ORACLE_DEP]->(o:Entity)
+WHERE od.pricing_authority = true OR od.value_defining = true
+WITH m, a, o
+MATCH (o)-[:ORACLE_DEP]->(f:Entity)
+RETURN m.id AS mkt, a.allocated_usd AS alloc, o.id AS oracleId,
+       coalesce(o.primary_label,o.blockscout_name,o.id) AS oracleName,
+       f.id AS feedId, f.oracle_pair AS pair, coalesce(f.primary_label,f.blockscout_name,f.id) AS feed
+ORDER BY alloc DESC LIMIT 200
+```
+
+A multi-market vault returns a large payload; parse it from a file rather than reading it into context. Then repeat the hop-3 pattern on each underlying until a branch yields nothing new. A typical chain runs six hops before it terminates: vault to market to a wrapped LST to its underlying to that underlying's backing contract. For the control chain above any node it reaches, use the bounded upward walk and fan-out guard in Control closure.
 
 ---
-
-<a name="crosscheck"></a>
-## Cross-checking against Morpho (A8)
-
-See SKILL.md A8 for the checklist and the schema traps. The endpoint is
-`https://blue-api.morpho.org/graphql`, no auth, and `app.morpho.org` is a JS shell with no data in
-the HTML. Write the query to a file; shell quoting mangles inlined nested quotes.
-
-```bash
-curl -s -X POST https://blue-api.morpho.org/graphql \
-  -H 'Content-Type: application/json' -d @/tmp/q.json | python3 -m json.tool
-```
-
-Introspect rather than guessing a field: `{ __type(name:"VaultV2"){ fields{ name } } }`.
 
 <a name="defensive"></a>
 ## Defensive borrowing inputs
 
-Three reads size the rush scenario for one market. See SKILL.md for what the
-numbers mean; these are the queries that produce them.
+Three reads size the rush for one market; `defensive-borrowing.md` says what the numbers mean.
 
-**1. Market state, including both caps.** Never call `keys()` on a
-`lending_market` node, they carry 200+ properties. A **null cap is the absence
-of a cap**, not a cap of zero: coalescing it deletes the effect being measured.
+**1. Market state.** Never call bare `keys()` on a `lending_market` node.
 
 ```cypher
-MATCH (m:Entity {id:'<market_node_id>', graph_id:'<PARTITION>'})
-RETURN m.collateral_asset AS collat, m.loan_asset AS loan,
-       toFloat(m.lltv)/1e16                     AS lltvPct,
-       round(toFloat(m.total_supplied_usd))     AS supplied,
-       round(toFloat(m.total_borrowed_usd))     AS borrowed,
+MATCH (m:Entity {id:'<market_node_id>'})
+RETURN m.collateral_asset AS collat, m.loan_asset AS loan, m.market_key AS marketKey,
+       toFloat(m.lltv)/1e16                      AS lltvPct,
+       round(toFloat(m.total_supplied_usd))      AS supplied,
+       round(toFloat(m.total_borrowed_usd))      AS borrowed,
        round(toFloat(m.available_liquidity_usd)) AS liq,
-       m.utilization_pct AS util,
-       m.borrow_cap_usd  AS borrowCap,   // null on Morpho Blue: no cap exists
-       m.supply_cap_usd  AS supplyCap,
-       m.lending_protocol AS proto
+       m.utilization_pct AS util, m.lending_protocol AS proto
 ```
 
-**2. Collateral actually posted, and who posted it.** `reserve_id` is the loan
-**token** address, not a market id; passing a market id returns zero rows and
-reads as "no borrowers".
+Caps are not on the market node, and where they live depends on the protocol (`defensive-borrowing.md`). Morpho Blue has none. Aave v3 writes both caps onto the underlying token node, in whole tokens; they are Aave v3's own, so never apply them to a fork such as Spark, whose caps are read on-chain (`protocol-crosschecks.md`):
 
 ```cypher
-MATCH (t:Entity {id:'<loan_token_address>', graph_id:'<PARTITION>'})<-[r:LENDING_BORROW]-(b:Entity {graph_id:'<PARTITION>'})
+UNWIND ['<underlying token>'] AS tId
+MATCH (t:Entity {id:tId})
+RETURN t.symbol AS sym, t.borrow_cap AS borrowCapTokens, t.supply_cap AS supplyCapTokens,
+       t.borrow_cap_block AS borrowCapBlock, t.supply_cap_block AS supplyCapBlock
+LIMIT 5
+```
+
+Compound v3's collateral supply cap is on the collateral's edge to its Comet:
+
+```cypher
+MATCH (c:Entity {id:'<collateral token>'})-[r:LENDING_COLLATERAL]->(m:Entity {id:'<comet>'})
+RETURN r.protocol AS protocol, r.supply_cap AS supplyCapRaw, r.supply_cap_block AS capBlock,
+       c.decimals AS collateralDecimals
+```
+
+**2. Collateral actually posted, and who posted it.** On morpho_blue, key one market exactly by the edge's `market_id` (the market's `market_key`). Anchoring on the loan token and filtering by collateral token merges every market that shares the pair, whatever its LLTV or oracle.
+
+```cypher
+MATCH (b:Entity)-[r:LENDING_BORROW {market_id:'<market_key>'}]->(t:Entity)
 WHERE r.protocol = 'morpho_blue'
-  AND r.collateral_token = '<collateral_token_address>'
 RETURN count(*)                              AS borrowers,
        round(sum(toFloat(r.debt_usd)))       AS debt,
        round(sum(toFloat(r.collateral_usd))) AS collat,
-       round(max(toFloat(r.debt_usd)))       AS topDebt
+       round(max(toFloat(r.debt_usd)))       AS topDebt,
+       collect(DISTINCT r.collateral_token)  AS collTokens,
+       min(r.last_stat_block) AS oldestBlk, max(r.last_stat_block) AS newestBlk
+LIMIT 5
 ```
 
-Run the implied-price verifier on `collat` before using it:
-`Σ collateral_usd / (Σ collateral_raw / 10^decimals)` against the collateral
-node's `usd_price`. A degenerate price here inflates the collateral room.
+On the Aave family, anchor on the reserve token as in Borrowers. Run the implied-price verifier (Per-borrower LTV) on `collat` before using it: a degenerate price inflates the collateral room.
 
-**3. Can new collateral be posted without limit?** This decides whether the
-posted-collateral figure is a ceiling or merely a floor. A mint role in the set,
-with `max_key_value_usd` approaching the asset's market cap, means the answer is
-no limit: the attacker's collateral supply is whatever they mint.
+**3. Can new collateral be posted without limit?** This decides whether the posted-collateral figure is a ceiling or merely a floor. A mint role in the set, with `max_key_value_usd` approaching the asset's market cap, means no limit: the attacker's collateral supply is whatever they mint.
 
 ```cypher
-MATCH (a:Entity {id:'<asset>', graph_id:'<PARTITION>'})
-RETURN a.admin_roles            AS roles,      // JSON string, parse it
+MATCH (a:Entity {id:'<asset>'})
+RETURN a.admin_roles            AS roles,
        a.max_key_value_usd      AS maxKey,
-       a.owner_discovery_status AS status,      // 'ok' = the set was probed
+       a.owner_discovery_status AS status,
        a.total_supply_raw AS supply, a.usd_price AS px, a.decimals AS dec
 ```
 
-**A trap worth knowing on Vault V2 anchors.** Filtering the vault's outbound
-`LENDING_COLLATERAL` by `collateral_token_address` to find "the market where
-asset X is collateral" can return **zero rows** while the exposure is real: on
-an adapter-routed V2 vault the per-market split sits on outbound
-`VAULT_ALLOCATION` (carrying `market_key`, `adapter_address`, `share_pct`) and
-the `LENDING_COLLATERAL` set is sparse or holds only stray dust markets. Read
-the allocations, take `market_key`, then query the market node directly.
-
+**A trap on Vault V2 anchors.** Filtering the vault's outbound `LENDING_COLLATERAL` by collateral token to find "the market where asset X is collateral" can return zero rows while the exposure is real: on an adapter-routed V2 vault the per-market split sits on outbound `VAULT_ALLOCATION` (carrying `market_key`, `adapter_address`, `share_pct`), and the `LENDING_COLLATERAL` set is sparse or holds only stray dust markets. Read the allocations, take the target market, then query the market node directly.

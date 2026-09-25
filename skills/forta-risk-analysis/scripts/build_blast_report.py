@@ -197,7 +197,10 @@ def _rush_paths(f, by_key, offvector_ids):
     best = {}
     for p in f.get("paths") or []:
         k = p.get("position_key") or p.get("id")
-        if k not in by_key or p.get("id") in off:
+        # A ceiling is excluded from total_loss, so it must be excluded here too:
+        # letting one into the rush total makes Maximum loss exceed Current loss
+        # by a figure the report elsewhere says is not a measurement.
+        if k not in by_key or p.get("id") in off or p.get("ceiling"):
             continue
         v = _rush_loss(p)
         if k not in best or v > best[k][0]:
@@ -505,6 +508,32 @@ background:#eef1f4;color:var(--dim);text-transform:uppercase;letter-spacing:.05e
 .tag.c{background:#fdf3e3;color:var(--warm)}
 .tag.u{background:#fdeceb;color:var(--hot)}
 .note{font-size:12px;color:var(--dim)}
+
+/* Print / PDF. Backgrounds here are load-bearing, not decoration: the binding
+   constraint in the rush table and the drained rows in the incidence table are
+   marked by colour alone, and Chrome drops backgrounds unless told otherwise. */
+@media print{
+  @page{size:A4;margin:14mm 12mm}
+  *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  body{font-size:10.5px}
+  .wrap{max-width:none;padding:0}
+  h1{font-size:19px}
+  h2{font-size:14px;break-after:avoid;page-break-after:avoid}
+  h3{break-after:avoid;page-break-after:avoid}
+  table{break-inside:auto}
+  thead{display:table-header-group}
+  /* thead SHOULD repeat per page; tfoot must NOT. A Total repeated at the
+     foot of every page reads as a subtotal of the rows above it. */
+  tr{break-inside:avoid;page-break-inside:avoid}
+  /* a figure row and the sentence qualifying it must not be split across pages */
+  tr.basis{break-before:avoid;page-break-before:avoid}
+  .heads{break-inside:avoid;page-break-inside:avoid}
+  .head{flex:1 1 auto}
+  .diag{break-inside:avoid;page-break-inside:avoid;overflow:visible}
+  .diag svg{min-width:0;width:100%;height:auto}
+  .note,.warn{break-inside:avoid;page-break-inside:avoid}
+  a{text-decoration:none;color:inherit}
+}
 .diag{margin:18px 0 8px;padding:14px 6px;background:var(--soft);
 border:1px solid var(--line);border-radius:9px;overflow-x:auto}
 .diag svg{display:block;min-width:640px}
@@ -900,8 +929,7 @@ def render_defensive(f, c):
     paths.sort(key=lambda p: -_rush_loss(p))
     if not paths:
         return ""
-    n = 3 if (f.get("incidence") or {}).get("bearers") else 2
-    h = ['<h2>%d. Defensive borrowing: what the loss becomes in a rush</h2>' % n]
+    h = ['<h2>2. Defensive borrowing: what the loss becomes in a rush</h2>']
     h.append('<p class="note">An asset known to be failing keeps its old price until the '
              'market oracle catches up. In that window the rational move for anyone '
              'holding it is to post it as collateral, borrow whatever the market will '
@@ -953,7 +981,38 @@ def render_defensive(f, c):
     return "".join(h)
 
 
-def render_incidence(f, c):
+def render_unconnected(f, c):
+    """Positions the traversal reached and could NOT connect to the subject.
+
+    These dollars are in the portfolio total and in the coverage check, so
+    without this table the reader sees an aggregate in one sentence and cannot
+    tell a position with a stated reason apart from one that was never walked.
+    A no-route row is a finding, and the reason is the finding.
+    """
+    rows = f.get("unconnected") or []
+    if not rows:
+        return ""
+    s = f.get("subject") or {}
+    h = ['<h3>Positions with no route to %s</h3>' % escape(s.get("name") or "the subject")]
+    h.append('<table><thead><tr><th>Position</th>'
+             '<th class="n">Held</th><th class="n">% assets</th></tr></thead><tbody>')
+    tot = 0.0
+    for r in sorted(rows, key=lambda r: -float(r.get("usd") or 0)):
+        v = float(r.get("usd") or 0)
+        tot += v
+        h.append('<tr><td><b>%s</b></td><td class="n">%s</td><td class="n">%s</td></tr>'
+                 % (escape(r.get("position") or ""), money(v),
+                    pct(v / c["assets"] * 100 if c["assets"] else 0)))
+        if r.get("why"):
+            h.append('<tr class="basis"><td class="note" colspan="3">%s</td></tr>'
+                     % escape(r["why"]))
+    h.append('</tbody><tfoot><tr><td>Total</td><td class="n">%s</td>'
+             '<td class="n">%s</td></tr></tfoot></table>'
+             % (money(tot), pct(tot / c["assets"] * 100 if c["assets"] else 0)))
+    return "".join(h)
+
+
+def render_incidence(f, c, n=2):
     """Who actually bears the loss.
 
     A path table says where the money sits and what it is worth after the
@@ -970,31 +1029,71 @@ def render_incidence(f, c):
     rows = inc.get("bearers") or []
     if not rows:
         return ""
-    h = ['<h2>%s</h2>' % escape(inc.get("title")
-                                or "Who bears the loss")]
+    # The rush column is optional: it only means anything when a defensive
+    # scenario was sized, and a bearer that the extra draw cannot reach keeps
+    # its current figure rather than showing a blank.
+    has_max = any(r.get("max_usd") is not None for r in rows)
+    h = ['<h2>%d. %s</h2>' % (n, escape(inc.get("title") or "Who bears the loss"))]
     if inc.get("note"):
         h.append('<p class="note">%s</p>' % escape(inc["note"]))
+    # Each loss is shown against the assets of the party that bears it, never
+    # against the portfolio: a $360k hit is noise to WETH suppliers and 7.7% of
+    # the RLUSD reserve. The asset base sits under the bearer's name rather than
+    # in its own column, so no column here is a division of two others.
+    ncol = 6 if has_max else 4
     h.append('<table><thead><tr><th>Bears the loss</th><th>How it reaches them</th>'
-             '<th class="n">Loss</th><th class="n">Share</th></tr></thead><tbody>')
+             '<th class="n">Current loss</th><th class="n">of its assets</th>'
+             + ('<th class="n">Maximum loss</th><th class="n">of its assets</th>'
+                if has_max else '')
+             + '</tr></thead><tbody>')
     tot = sum(float(r.get("usd") or 0) for r in rows)
-    for r in sorted(rows, key=lambda r: -float(r.get("usd") or 0)):
+    tmax = sum(float(r.get("max_usd") if r.get("max_usd") is not None else r.get("usd") or 0)
+               for r in rows)
+    def _share(num, den):
+        if not den:
+            return "&mdash;"
+        p = num / float(den) * 100.0
+        # a sub-basis-point hit reads as 0.00% and looks like a missing figure
+        return "&lt;0.01%" if 0 < p < 0.005 else pct(p)
+    for r in sorted(rows, key=lambda r: -float(r.get("max_usd")
+                                               if r.get("max_usd") is not None
+                                               else r.get("usd") or 0)):
         v = float(r.get("usd") or 0)
-        h.append('<tr><td><b>%s</b></td><td>%s</td><td class="n">%s</td>'
-                 '<td class="n">%s</td></tr>'
-                 % (escape(r.get("who") or ""), escape(r.get("how") or ""),
-                    money(v), pct(v / tot * 100 if tot else 0)))
+        mv = float(r.get("max_usd") if r.get("max_usd") is not None else v)
+        den = r.get("denominator_usd")
+        cells = ('<td class="n">%s</td><td class="n">%s</td>'
+                 % (money(v), _share(v, den)))
+        if has_max:
+            grew = mv > v * 1.0001
+            cells += ('<td class="n">%s%s</td><td class="n">%s</td>'
+                      % (money(mv), ' <span class="tag u">drained</span>' if grew else '',
+                         _share(mv, den)))
+        sub = ('<div class="note">%s %s</div>'
+               % (escape(r.get("denominator_label") or "its assets"), money(den))) if den else ''
+        h.append('<tr><td><b>%s</b>%s</td><td>%s</td>%s</tr>'
+                 % (escape(r.get("who") or ""), sub, escape(r.get("how") or ""), cells))
         if r.get("basis"):
-            h.append('<tr class="basis"><td></td><td class="note" colspan="3">%s</td></tr>'
-                     % escape(r["basis"]))
+            h.append('<tr class="basis"><td></td><td class="note" colspan="%d">%s</td></tr>'
+                     % (ncol - 1, escape(r["basis"])))
     h.append('</tbody><tfoot><tr><td colspan="2">Total</td><td class="n">%s</td>'
-             '<td class="n">%s</td></tr></tfoot></table>' % (money(tot), pct(100.0)))
+             '<td class="n">&mdash;</td>' % money(tot))
+    if has_max:
+        h.append('<td class="n">%s</td><td class="n">&mdash;</td>' % money(tmax))
+    h.append('</tr></tfoot></table>')
     tl = float(c.get("total_loss") or 0)
+    rl = float(c.get("rush_loss") or 0)
     drift = abs(tot - tl) / tl * 100 if tl else 0
+    extra = ""
+    if has_max and rl:
+        d2 = abs(tmax - rl) / rl * 100
+        drift = max(drift, d2)
+        extra = (" The maximum column accounts for %s against the %s headline, %.2f%% apart."
+                 % (money(tmax), money(rl), d2))
     h.append('<div class="%s"><b>Incidence check.</b> The bearers above account for %s '
-             'against the %s of loss in section 1, %.2f%% apart. These are the same '
+             'against the %s of loss in section 1, %.2f%% apart.%s These are the same '
              'dollars seen by who loses them, so they are never added to the path '
              'total.%s</div>'
-             % ("note" if drift <= 1.0 else "warn", money(tot), money(tl), drift,
+             % ("note" if drift <= 1.0 else "warn", money(tot), money(tl), drift, extra,
                 "" if drift <= 1.0 else " <b>This does not close.</b>"))
     return "".join(h)
 
@@ -1020,6 +1119,57 @@ def render_common_cause(f, c, n):
             h.append('<tr class="basis"><td></td><td class="note" colspan="2">%s</td></tr>'
                      % escape(r["note"]))
     h.append("</tbody></table>")
+    return "".join(h)
+
+
+def render_accounts(f, c, n):
+    """Named-address impact.
+
+    A blast table sizes the portfolio. This sizes individual counterparties
+    inside it, which is a different question: a levered account's OWN loss is
+    its equity, not its collateral, because it abandons the position rather
+    than repaying. The two figures that matter per account are therefore what
+    IT loses and what it leaves behind for everyone else, and they must be in
+    separate columns because they land on different people.
+    """
+    a = f.get("accounts")
+    if not a:
+        return ""
+    rows = a.get("entries") or []
+    if not rows:
+        return ""
+    h = ['<h2>%d. %s</h2>' % (n, escape(a.get("title") or "Impact on named addresses"))]
+    if a.get("note"):
+        h.append('<p class="note">%s</p>' % escape(a["note"]))
+    NC = 6
+    h.append('<table><thead><tr><th>Address</th><th class="n">Exposed collateral</th>'
+             '<th class="n">Surviving collateral</th><th class="n">Debt abandoned</th>'
+             '<th class="n">Loss to the account</th>'
+             '<th class="n">Bad debt it leaves behind</th></tr></thead><tbody>')
+    t_exp = t_surv = t_debt = t_own = t_bad = 0.0
+    for r in sorted(rows, key=lambda r: -float(r.get("bad_debt_usd") or 0)):
+        exp = float(r.get("exposed_collateral_usd") or 0)
+        surv = float(r.get("surviving_collateral_usd") or 0)
+        debt = float(r.get("debt_usd") or 0)
+        own = float(r.get("own_loss_usd") or 0)
+        bad = float(r.get("bad_debt_usd") or 0)
+        t_exp += exp; t_surv += surv; t_debt += debt; t_own += own; t_bad += bad
+        h.append('<tr><td><b>%s</b><div class="note mono">%s</div>'
+                 '<div class="note">%s</div></td>'
+                 '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td>'
+                 '<td class="n">%s</td><td class="n">%s</td></tr>'
+                 % (escape(r.get("label") or ""), addr(r.get("id")),
+                    escape(r.get("what") or ""),
+                    money(exp), money(surv), money(debt), money(own), money(bad)))
+        if r.get("basis"):
+            h.append('<tr class="basis"><td></td><td class="note" colspan="%d">%s</td></tr>'
+                     % (NC - 1, escape(r["basis"])))
+    h.append('<tr class="sum"><td>Total</td><td class="n">%s</td><td class="n">%s</td>'
+             '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td></tr>'
+             % (money(t_exp), money(t_surv), money(t_debt), money(t_own), money(t_bad)))
+    h.append("</tbody></table>")
+    if a.get("footnote"):
+        h.append('<div class="note">%s</div>' % escape(a["footnote"]))
     return "".join(h)
 
 
@@ -1107,12 +1257,20 @@ def render_targeted(f, c, checks):
              '<td class="n">%s</td><td class="n">%s</td><td class="n">%s</td></tr></tfoot></table>'
              % (money(c["total_exposure"]), money(c["total_loss"]), pct(c["loss_pct"])))
 
-    # 2. who bears it (optional), then defensive borrowing
-    h.append(render_incidence(f, c))
-    h.append(render_defensive(f, c))
-    n = 2 + bool((f.get("incidence") or {}).get("bearers")) \
-          + bool([p for p in (f.get("paths") or []) if p.get("defensive_borrowing")])
-    h.append(render_common_cause(f, c, n))
+    h.append(render_unconnected(f, c))
+
+    # 2. the rush, 3. who bears it, then the optional tail sections. Sections are
+    # numbered by what is actually present, so deleting one does not leave a gap.
+    nxt = 2
+    d = render_defensive(f, c)
+    if d:
+        h.append(d); nxt += 1
+    if (f.get("incidence") or {}).get("bearers"):
+        h.append(render_incidence(f, c, nxt)); nxt += 1
+    if f.get("common_cause"):
+        h.append(render_common_cause(f, c, nxt)); nxt += 1
+    if (f.get("accounts") or {}).get("entries"):
+        h.append(render_accounts(f, c, nxt)); nxt += 1
 
     # arithmetic check, kept as one line rather than a section
     drift = (abs(c["reconciled"] - c["assets"]) / c["assets"] * 100) if c["assets"] else 0
